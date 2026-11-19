@@ -813,6 +813,29 @@ Path(os.environ["LAUNCH_TEST_ARGS"]).write_text(json.dumps(sys.argv[1:]))
         self.assertIn("--task=查询实时位姿并报告", args)
         self.assertFalse(any(arg.startswith("--frontend-") for arg in args))
 
+    def test_real_mode_passes_only_its_own_service_configuration(self):
+        self.env.update(
+            RPENT_UNITREE_MODE="real",
+            RPENT_REAL_ENDPOINT="http://robot-gateway.test:9001",
+            RPENT_ROBOT_INDEX="2",
+            RPENT_TASK_REPORTING="local",
+            RPENT_VLN_ENDPOINT="ws://simulation-only.test:8050",
+        )
+        result = self.launch("go2-status", "查询在线状态")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = json.loads((self.root / "args.json").read_text())
+        self.assertEqual(args[args.index("--unitree-mode") + 1], "real")
+        self.assertEqual(args[args.index("--robot-index") + 1], "2")
+        self.assertEqual(
+            args[args.index("--real-endpoint") + 1], "http://robot-gateway.test:9001"
+        )
+        self.assertFalse(
+            any(
+                arg.startswith(("--sim-", "--nav-", "--vln-", "--frontend-"))
+                for arg in args
+            )
+        )
+
     def test_unknown_reporting_mode_fails_before_launch(self):
         self.env["RPENT_TASK_REPORTING"] = "invalid"
         result = self.launch("dispatch-123", "test")

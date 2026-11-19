@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Robot registration and CLI hooks for the Unitree command RPC prototype."""
+"""Robot registration and CLI hooks for the Unitree runtimes."""
 
 from __future__ import annotations
 
@@ -58,6 +58,21 @@ def get_toolkit(
     config: RunConfig,
 ):
     """Bind the runtime client to the planner's movement tools."""
+    if config.prompt_vars.get("unitree_mode") == "real":
+        from robots.unitree.real_toolkit import RealRobotToolkit
+
+        real = runtime_kwargs["real"]
+        try:
+            return RealRobotToolkit(
+                real=real,
+                dashboard_events=dashboard_events,
+                memory=MemoryManager(config.prompt_vars["memory_dir"]),
+                state_output_dir=config.output_dir,
+                action_timeout_s=config.prompt_vars["real_action_timeout_s"],
+            )
+        except Exception:
+            real.close()
+            raise
     if config.prompt_vars.get("unitree_mode", "gateway") == "mujoco":
         from robots.unitree.mujoco_toolkit import UnitreeMujocoToolkit
 
@@ -105,9 +120,9 @@ def _add_cli_args(parser: argparse.ArgumentParser, use_dashboard: bool) -> None:
     )
     parser.add_argument(
         "--unitree-mode",
-        choices=("gateway", "mujoco"),
+        choices=("gateway", "mujoco", "real"),
         default="gateway",
-        help="Use the dis_move gateway (default) or external MuJoCo navigation services.",
+        help="Use the legacy gateway, external MuJoCo navigation, or physical Go2 /call service.",
     )
     parser.add_argument(
         "--nav-endpoint",
@@ -172,13 +187,24 @@ def _add_cli_args(parser: argparse.ArgumentParser, use_dashboard: bool) -> None:
         "--robot-index",
         type=int,
         default=None,
-        help="Default gateway robot index; omit to select a robot in each tool call.",
+        help="Required robot index in real mode. Optional default index in legacy gateway mode.",
     )
     parser.add_argument(
         "--env-timeout-s",
         type=float,
         default=None,
         help="Override command RPC and readiness waits in seconds; by default, command waits use the motion budget plus 30 s and readiness uses 10 s.",
+    )
+    parser.add_argument(
+        "--real-endpoint",
+        default=None,
+        help="HTTP base URL of the physical Go2 communication service (port 9001).",
+    )
+    parser.add_argument(
+        "--real-action-timeout-s",
+        type=float,
+        default=180.0,
+        help="Time to wait for a physical move or capture result (default: 180 seconds).",
     )
 
 
@@ -195,6 +221,23 @@ def _parse_config(args: argparse.Namespace) -> RunConfig:
     if args.robot_index is not None:
         validate_robot_index(args.robot_index)
     unitree_mode = getattr(args, "unitree_mode", "gateway")
+    if unitree_mode == "real":
+        from robots.unitree.http_client import validate_endpoint
+
+        if not args.real_endpoint or args.robot_index is None:
+            raise ValueError("real mode requires --real-endpoint and --robot-index")
+        validate_endpoint(args.real_endpoint)
+        if args.real_endpoint.rstrip("/").endswith("/call"):
+            raise ValueError("--real-endpoint is a base URL; omit /call")
+        if args.env_timeout_s is not None:
+            raise ValueError("real mode uses --real-action-timeout-s for action waits")
+        if (
+            not math.isfinite(args.real_action_timeout_s)
+            or args.real_action_timeout_s <= 0
+        ):
+            raise ValueError("--real-action-timeout-s must be finite and positive")
+    elif getattr(args, "real_endpoint", None) is not None:
+        raise ValueError("--real-endpoint requires --unitree-mode real")
     vln_endpoint = getattr(args, "vln_endpoint", None)
     observation_endpoint = getattr(args, "observation_endpoint", None)
     if (vln_endpoint is None) != (observation_endpoint is None):
@@ -254,6 +297,13 @@ def _parse_config(args: argparse.Namespace) -> RunConfig:
         else get_memory_dir("unitree")
     )
     mode_vars = {"unitree_mode": unitree_mode}
+    env_endpoint = args.env_endpoint
+    if unitree_mode == "real":
+        env_endpoint = args.real_endpoint
+        mode_vars.update(
+            real_endpoint=args.real_endpoint,
+            real_action_timeout_s=args.real_action_timeout_s,
+        )
     if unitree_mode == "mujoco":
         mode_vars.update(
             nav_endpoint=args.nav_endpoint,
@@ -278,18 +328,20 @@ def _parse_config(args: argparse.Namespace) -> RunConfig:
         output_dir=output_dir,
         prompt_vars={
             "task": task,
-            "env_endpoint": args.env_endpoint,
+            "env_endpoint": env_endpoint,
             "robot_index": args.robot_index,
             "memory_dir": str(memory_dir),
             **mode_vars,
         },
         task_desc={
             "task": task,
-            "env_endpoint": args.env_endpoint,
+            "env_endpoint": env_endpoint,
             "robot_index": args.robot_index,
-            "validation_scope": "mujoco_navigation"
-            if unitree_mode == "mujoco"
-            else VALIDATION_SCOPE,
+            "validation_scope": {
+                "mujoco": "mujoco_navigation",
+                "real": "real_relative_actions",
+                "gateway": VALIDATION_SCOPE,
+            }[unitree_mode],
             **mode_vars,
         },
     )
@@ -303,6 +355,23 @@ def _init_runtime(
 ) -> tuple[list[ProcessDaemon], dict[str, Any]]:
     if getattr(args, "unitree_mode", "gateway") == "mujoco":
         return _init_mujoco_runtime(args, components)
+    if getattr(args, "unitree_mode", "gateway") == "real":
+        from robots.unitree.real_client import RealRobotClient
+
+        if components is not None:
+            if components.difference({"real"}):
+                raise ValueError(
+                    f"unknown real runtime components: {sorted(components)}"
+                )
+            if not components:
+                return [], {}
+        real = RealRobotClient(args.real_endpoint, robot_index=args.robot_index)
+        try:
+            real.list_robots()
+        except Exception:
+            real.close()
+            raise
+        return [], {"real": real}
     from robots.unitree.env_client import UnitreeEnvClient
 
     selected = {"env"} if components is None else components

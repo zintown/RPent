@@ -205,6 +205,11 @@ class TaskRunner:
                 }
         except (OSError, ValueError):
             pass
+        try:
+            real_robot = _read_json(output / "real" / "latest.json")
+            record["navigation"] = {"real_robot": real_robot}
+        except (OSError, ValueError):
+            pass
         transcripts = sorted(output.glob("transcript_unitree*.json"))
         if transcripts:
             try:
@@ -321,6 +326,7 @@ class TaskRunner:
                 record = job.record
                 navigation = record["navigation"] or {}
                 vln = navigation.get("vln") or {}
+                real_robot = navigation.get("real_robot") or {}
                 finish = record["finish"] or {}
                 if (
                     record["forced_stop"]
@@ -328,6 +334,9 @@ class TaskRunner:
                     or navigation.get("active_control_id")
                     or navigation.get("submission_uncertain")
                     or navigation.get("stop_error")
+                    or real_robot.get("active_request_id")
+                    or real_robot.get("submission_uncertain")
+                    or real_robot.get("stop_error")
                     or (exit_code < 0 and not record["stop_requested"])
                 ):
                     status = "requires_attention"
@@ -346,6 +355,7 @@ class TaskRunner:
                     or record["error"]
                     or vln.get("error")
                     or vln.get("state") == "failed"
+                    or real_robot.get("error")
                     or finish.get("status") in {"failure", "stuck"}
                 ):
                     status = "failed"
@@ -362,11 +372,14 @@ class TaskRunner:
                 if status == "requires_attention" and not record["error"]:
                     record["error"] = (
                         navigation.get("stop_error")
+                        or real_robot.get("stop_error")
                         or "process cleanup or remote motion state needs verification"
                     )
                 if status == "failed" and not record["error"]:
                     record["error"] = (
-                        finish.get("summary") or f"process exited with code {exit_code}"
+                        real_robot.get("error")
+                        or finish.get("summary")
+                        or f"process exited with code {exit_code}"
                     )
                 self._persist(job)
                 logger.info(

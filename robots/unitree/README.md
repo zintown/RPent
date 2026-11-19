@@ -1,11 +1,12 @@
 # Unitree 接入说明
 
-RPent 提供两种 Unitree 模式，默认使用 `gateway`。
+`run_rpent.sh` 默认运行仿真。选用真机配置后，同一个脚本将任务交给 Go2 通信服务。直接运行 `rpent` 时仍可选择兼容旧网关的 `gateway` 模式。
 
 | 模式 | 连接对象 | 执行方式 |
 | --- | --- | --- |
 | `mujoco` | 外部 A*、MuJoCo，及可选 LightNav 服务 | 地图路线执行或图像驱动的航点闭环 |
-| `gateway` | 通信中转 RPC 服务 | `dis_move` 身体坐标相对移动，由本体执行 |
+| `real` | Go2 通信服务的 HTTP `/call` | 异步相对移动、抓拍、请求查询和停止 |
+| `gateway` | 旧版通信中转 RPC 服务 | 同步 `dis_move` 身体坐标相对移动 |
 
 安装 RPent 基础依赖并配置模型即可；MuJoCo 模式的客户端无需安装 MuJoCo 或 Torch。Unitree CLI 要求 TTY，不接入内置 Dashboard，也不支持交互模式和探索模式。HTTP 启动服务自动为子进程分配 TTY。记忆默认保存在本地。
 
@@ -14,10 +15,11 @@ RPent 提供两种 Unitree 模式，默认使用 `gateway`。
 | 文档 | 内容 |
 | --- | --- |
 | [MuJoCo 使用指南](MUJOCO_USAGE.zh-CN.md) | 环境准备、持续往返、预算、到达验收和结果检查 |
+| [Go2 真机使用指南](REAL_USAGE.zh-CN.md) | 配置通信网关、启动真机任务、查询执行结果 |
 | [前端与 HTTP 服务](FRONTEND_USAGE.zh-CN.md) | 配置、启动服务、提交任务、查询、停止和结果回调 |
 | [LightNav VLN 接入](VLN_USAGE.zh-CN.md) | 模型服务、第一视角、航点闭环、停车与前端状态 |
-| [中转 RPC 接口](INTERFACE.zh-CN.md) | 真机网关的请求、回执、误差和超时约定 |
-| [真机测试](REAL_ROBOT_TEST.zh-CN.md) | 只读检查、单次动作和模型调用测试 |
+| [旧版中转 RPC 接口](INTERFACE.zh-CN.md) | 同步网关的请求、回执、误差和超时约定 |
+| [旧版网关测试](REAL_ROBOT_TEST.zh-CN.md) | 只读检查、单次动作和模型调用测试 |
 | [外部导航服务参考](NAVIGATION.zh-CN.md) | A* 服务部署、坐标系及 HTTP／WebSocket 协议 |
 
 ## MuJoCo 工具
@@ -87,6 +89,7 @@ rpent --robot unitree --planner api --model openai:deepseek-flash \
 | 文件 | 职责 |
 | --- | --- |
 | [robot_spec.py](robot_spec.py)、[prompt_bundle.py](prompt_bundle.py) | 模式注册、参数、客户端及模型提示词 |
+| [real_client.py](real_client.py)、[real_toolkit.py](real_toolkit.py) | 真机通信、异步请求轮询、停车确认和任务状态 |
 | [mujoco_toolkit.py](mujoco_toolkit.py) | 规划、预演、执行、验收、取消和状态记录 |
 | [navigation_client.py](navigation_client.py)、[simulation_client.py](simulation_client.py)、[http_client.py](http_client.py) | A*／仿真 HTTP 协议与响应校验 |
 | [vln_client.py](vln_client.py)、[observation_client.py](observation_client.py)、[vln_navigation.py](vln_navigation.py) | LightNav 协议、采集观测和有期限的控制闭环 |

@@ -60,6 +60,12 @@ navigation = {
     "frontend": {"task_id": sys.argv[1], "sub_tasks": [{"sub_task_id": "child-1"}]},
 }
 (output / "states.json").write_text(json.dumps({"steps": [{"state": navigation}]}))
+if mode == "real-unresolved":
+    (output / "real").mkdir()
+    (output / "real/latest.json").write_text(json.dumps({
+        "backend": "real", "active_request_id": "real-request-1",
+        "stop_error": "stop confirmation unavailable",
+    }))
 if mode in ("wait", "force"):
     def stop(sig, frame):
         print("SIGINT cleanup completed", flush=True)
@@ -166,6 +172,19 @@ class TaskServerTest(unittest.TestCase):
                     self.assertEqual(result["exit_code"], 7)
                     self.assertIn("7", runner.get(task_id)["error"])
                 runner.close()
+
+    def test_unconfirmed_real_motion_blocks_later_tasks(self):
+        os.environ["RPENT_TEST_MODE"] = "real-unresolved"
+        runner = self.runner(task_reporting="local")
+        runner.start(RunRequest(task_id="parent-1", task_name="test"))
+        result = self.wait_finished(runner)
+        self.assertEqual(result["status"], "requires_attention")
+        self.assertEqual(result["error"], "stop confirmation unavailable")
+        self.assertEqual(
+            result["navigation"]["real_robot"]["active_request_id"], "real-request-1"
+        )
+        with self.assertRaises(TaskConflict):
+            runner.start(RunRequest(task_id="next-real", task_name="test"))
 
     def test_http_runner_uses_the_existing_launch_script(self):
         repo = Path(__file__).resolve().parents[4]
