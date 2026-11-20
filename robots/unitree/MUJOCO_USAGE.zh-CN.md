@@ -17,18 +17,7 @@ RPent 通过 A* MCP 查询点位和规划路径，再把 `plan_id` 交给 MuJoCo
   --astar-mcp-url http://127.0.0.1:8790/mcp --port 8791
 ```
 
-在 RPent 运行机器上保存 `mcp.toml`。
-
-```toml
-[mcp_servers.astar]
-url = "http://127.0.0.1:8790/mcp"
-enabled_tools = ["list_waypoints", "plan_route"]
-
-[mcp_servers.mujoco]
-url = "http://127.0.0.1:8791/mcp"
-enabled_tools = ["get_pose", "follow_plan", "get_walk_status"]
-tool_timeout_sec = 150
-```
+仓库根目录的 [mcp.toml](../../mcp.toml) 已配置上述两个 MCP 端点和允许调用的能力。端口变更时，在配置中填写实际的 MCP 地址。
 
 `follow_plan` 等待实际行走完成。它的默认行走预算为 120 秒，可用 MuJoCo MCP 的 `--walk-timeout-s` 调整。同步把 `tool_timeout_sec` 设得比行走预算加清理时间更长。
 
