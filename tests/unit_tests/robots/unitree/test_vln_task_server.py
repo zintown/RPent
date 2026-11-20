@@ -21,7 +21,7 @@ import sys
 import time
 from pathlib import Path
 
-from robots.unitree.task_server import RunRequest, TaskRunner
+from robots.unitree.mcp.task.runner import RunRequest, TaskRunner
 
 CHILD = r"""
 import json, time

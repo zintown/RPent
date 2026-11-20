@@ -4,7 +4,7 @@
 # You may obtain a copy of the License at
 # https://www.apache.org/licenses/LICENSE-2.0
 
-"""Task-level MCP tools sharing the HTTP runner's persistence and motion owner."""
+"""MCP tools for submitting and monitoring Unitree tasks."""
 
 from __future__ import annotations
 
@@ -12,15 +12,14 @@ import asyncio
 import re
 import time
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import Annotated, Any
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
-if TYPE_CHECKING:
-    from robots.unitree.task_server import TaskRunner
+from robots.unitree.mcp.task.runner import ACTIVE_STATUSES, RunRequest, TaskRunner
 
 
 def create_task_mcp(
@@ -105,8 +104,6 @@ def create_task_mcp(
         Returns:
             created and task; created=false means this ID already owns the same task.
         """
-        from robots.unitree.task_server import RunRequest
-
         runner = runner_for(robot_id)
         request = RunRequest(task_id=task_id, task_name=task_name)
         record, created = await asyncio.to_thread(runner.start, request)
@@ -124,8 +121,6 @@ def create_task_mcp(
         timeout_s: Annotated[float, Field(ge=0, le=30, allow_inf_nan=False)] = 10,
     ) -> dict[str, Any]:
         """Wait up to 30 seconds for a terminal state; timing out leaves the task running."""
-        from robots.unitree.task_server import ACTIVE_STATUSES
-
         runner = runner_for(robot_id)
         deadline = time.monotonic() + timeout_s
         while True:

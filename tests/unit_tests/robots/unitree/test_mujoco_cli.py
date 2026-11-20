@@ -214,8 +214,8 @@ def test_mcp_mode_uses_discovered_services_to_execute_the_saved_plan(
     tmp_path,
     navigation_loopback,
 ):
-    from robots.unitree.astar_mcp import create_astar_mcp
-    from robots.unitree.mujoco_mcp import create_mujoco_mcp
+    from robots.unitree.mcp.astar.server import create_astar_mcp
+    from robots.unitree.mcp.mujoco.server import create_mujoco_mcp
     from rpent.tools.mcp_client import McpClient, McpServerConfig
 
     services = navigation_loopback

@@ -34,7 +34,7 @@ bash run_rpent.sh "real-status-$(date -u +%Y%m%dT%H%M%SZ)" \
 在已加载上述配置的终端启动真机 runner。示例使用 `8781`，与本机使用 `8780` 的仿真 runner 分开。模型和 `RPENT_RUNNER_TOKEN` 从现有私有配置加载。
 
 ```bash
-../.venv/bin/python -m robots.unitree.task_server \
+../.venv/bin/python -m robots.unitree.mcp.task.server \
   --host 127.0.0.1 --port 8781 \
   --jobs-dir output/real-integration/jobs \
   --robot-id go2-real

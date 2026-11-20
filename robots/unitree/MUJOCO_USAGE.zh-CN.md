@@ -7,12 +7,12 @@ RPent 通过 A* MCP 查询点位和规划路径，再把 `plan_id` 交给 MuJoCo
 启动现有 A* 和 MuJoCo HTTP 服务，确认两者的 `map_id`、`map_version` 一致，且仿真已经运行。以下示例使用本机的 `8765` 和 `8770`。在 RPent 仓库目录打开两个终端，使用已安装 RPent 的 Python 环境分别启动。
 
 ```bash
-../.venv/bin/python -m robots.unitree.astar_mcp \
+../.venv/bin/python -m robots.unitree.mcp.astar.server \
   --nav-endpoint http://127.0.0.1:8765 --port 8790
 ```
 
 ```bash
-../.venv/bin/python -m robots.unitree.mujoco_mcp \
+../.venv/bin/python -m robots.unitree.mcp.mujoco.server \
   --sim-endpoint http://127.0.0.1:8770 \
   --astar-mcp-url http://127.0.0.1:8790/mcp --port 8791
 ```

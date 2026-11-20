@@ -97,7 +97,7 @@ fi
 # 从其他目录调用时，也以仓库为基准解析路径。
 rpent_python=$(cd -- "$(dirname -- "$rpent_python")" && pwd)/python
 cd -- "$rpent_repo_dir"
-"$rpent_python" -c 'import sys; from robots.unitree.task_server import validate_task_id; validate_task_id(sys.argv[1])' "$1"
+"$rpent_python" -c 'import sys; from robots.unitree.mcp.task.runner import validate_task_id; validate_task_id(sys.argv[1])' "$1"
 mkdir -p -- "${RPENT_RUNS_DIR:-logs}"
 rpent_run_dir=$(mktemp -d "${RPENT_RUNS_DIR:-logs}/rpend-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")
 echo "RPent output: $rpent_run_dir"

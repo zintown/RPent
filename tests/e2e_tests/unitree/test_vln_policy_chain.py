@@ -30,7 +30,7 @@ import httpx
 import pytest
 import uvicorn
 
-from robots.unitree.task_server import create_app
+from robots.unitree.mcp.task.server import create_app
 from rpent.tools.mcp_client import McpClient, McpServerConfig
 from tests.e2e_tests.offline_planner_server import (
     OFFLINE_MODEL_NAME,

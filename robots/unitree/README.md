@@ -15,10 +15,10 @@
 | 文件 | 职责 |
 | --- | --- |
 | [robot_spec.py](robot_spec.py)、[prompt_bundle.py](prompt_bundle.py) | 运行模式、参数与模型提示 |
-| [astar_mcp.py](astar_mcp.py)、[mujoco_mcp.py](mujoco_mcp.py) | A* 规划与 MuJoCo 执行的 MCP 入口 |
+| [mcp/astar/server.py](mcp/astar/server.py)、[mcp/mujoco/server.py](mcp/mujoco/server.py) | A* 规划与 MuJoCo 执行的 MCP 入口 |
 | [navigation_client.py](navigation_client.py)、[simulation_client.py](simulation_client.py) | 地图、路径、位姿和仿真执行接口 |
 | [mujoco_toolkit.py](mujoco_toolkit.py)、[vln_navigation.py](vln_navigation.py) | 仿真执行、LightNav 推理和图像航点控制 |
-| [task_server.py](task_server.py)、[task_mcp.py](task_mcp.py) | 接收 MCP 任务，管理子进程与本地执行记录 |
+| [mcp/task/server.py](mcp/task/server.py)、[mcp/task/tools.py](mcp/task/tools.py)、[mcp/task/runner.py](mcp/task/runner.py) | DSH 任务入口、调度工具、子进程与执行记录 |
 | [real_client.py](real_client.py)、[real_toolkit.py](real_toolkit.py) | 真机通信、异步请求状态和停车确认 |
 
 在仓库根目录运行离线测试。

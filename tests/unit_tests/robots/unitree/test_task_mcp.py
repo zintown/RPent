@@ -18,7 +18,7 @@ import pytest
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
-from robots.unitree.task_server import create_app
+from robots.unitree.mcp.task.server import create_app
 
 TOKEN = "offline-test-token"
 URL = "http://127.0.0.1:8780"

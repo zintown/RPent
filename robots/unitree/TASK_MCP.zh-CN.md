@@ -15,7 +15,7 @@ export RPENT_VENV_DIR="$(cd .. && pwd)/.venv"
 export RPENT_UNITREE_MODE=mcp
 export RPENT_MCP_CONFIG="$PWD/mcp.toml"
 
-"$RPENT_VENV_DIR/bin/python" -m robots.unitree.task_server \
+"$RPENT_VENV_DIR/bin/python" -m robots.unitree.mcp.task.server \
   --host 192.168.10.21 --port 8780 \
   --mcp-allowed-host go2-01.lan:8780 \
   --robot-id go2-01 \

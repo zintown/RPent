@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Exercise HTTP requests and real owned subprocesses without network or motion."""
+"""Exercise the task runner's owned subprocesses and startup validation."""
 
 import json
 import os
@@ -25,12 +25,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from robots.unitree.task_server import (
+from robots.unitree.mcp.task.runner import (
     RunRequest,
     TaskConflict,
     TaskRunner,
-    main,
 )
+from robots.unitree.mcp.task.server import main
 
 CHILD = r"""
 import hashlib

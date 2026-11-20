@@ -63,7 +63,7 @@ cd /home/yanlinjie/robot_project/rpent
 set -a
 source robots/unitree/vln_local.env
 set +a
-../.venv/bin/python -m robots.unitree.task_server \
+../.venv/bin/python -m robots.unitree.mcp.task.server \
   --host 127.0.0.1 --port 8780 --robot-id go2-01 \
   --jobs-dir output/vln-integration/jobs
 ```
