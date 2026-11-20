@@ -12,9 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Exercise outbound MCP discovery and calls over loopback HTTP."""
+"""Exercise outbound MCP discovery and calls over HTTP and stdio."""
 
 import json
+import os
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
@@ -25,7 +27,7 @@ from rpent.dashboard.events import NullDashboardEventSink
 from rpent.memory import MemoryManager
 from rpent.planner.utils.http_mcp_server import HttpMcpServer
 from rpent.tools import Toolkit, ToolResult, tool
-from rpent.tools.mcp_client import McpServerConfig
+from rpent.tools.mcp_client import McpClient, McpServerConfig, McpServiceError
 
 
 def make_toolkit(path):
@@ -95,3 +97,69 @@ def test_cancel_interrupts_wait_for_mcp_tool(tmp_path, remote):
                 assert call.result(timeout=1).data["interrupted"] is True
             finally:
                 release.set()
+
+
+def test_stdio_mcp_discovers_tools_and_releases_its_process(tmp_path, monkeypatch):
+    monkeypatch.setattr("rpent.utils.logging._output_dir", tmp_path / "run")
+    repository = tmp_path / "local server"
+    repository.mkdir()
+    (repository / "calculator.py").write_text(
+        """
+import os
+import sys
+from mcp.server.fastmcp import FastMCP
+
+mcp = FastMCP("calculator")
+
+@mcp.tool()
+def add(a: int, b: int) -> dict[str, int | str | bool]:
+    return {
+        "sum": a + b,
+        "pid": os.getpid(),
+        "argument": sys.argv[1],
+        "enabled": os.environ["RPENT_TEST_FORWARD"],
+        "inherited": "RPENT_TEST_PRIVATE" in os.environ,
+    }
+
+mcp.run(transport="stdio")
+"""
+    )
+    monkeypatch.setenv("RPENT_TEST_FORWARD", "allowed")
+    monkeypatch.setenv("RPENT_TEST_PRIVATE", "unrelated")
+    config = McpServerConfig(
+        transport="stdio",
+        command=sys.executable,
+        args=["calculator.py", "--one argument"],
+        cwd=str(repository),
+        env_from=["RPENT_TEST_FORWARD"],
+    )
+    with closing(make_toolkit(tmp_path / "local")) as toolkit:
+        toolkit.add_mcp_tools({"calculator": config})
+        tool = "mcp__calculator__add"
+        assert tool in {declaration.name for declaration in toolkit.list_tools()}
+        result = toolkit.execute_tool(tool, {"a": 17, "b": 25})
+        assert not result.is_error, result.data
+        values = result.data["structured_content"]
+        assert values["sum"] == 42
+        assert values["argument"] == "--one argument"
+        assert values["enabled"] == "allowed" and not values["inherited"]
+    with pytest.raises(ProcessLookupError):
+        os.kill(values["pid"], 0)
+
+
+def test_stdio_startup_timeout_releases_unresponsive_child(tmp_path):
+    pid_file = tmp_path / "pid"
+    program = (
+        "import os, time; from pathlib import Path; "
+        f"Path({str(pid_file)!r}).write_text(str(os.getpid())); time.sleep(30)"
+    )
+    config = McpServerConfig(
+        transport="stdio",
+        command=sys.executable,
+        args=["-c", program],
+        startup_timeout_sec=1.0,
+    )
+    with pytest.raises(McpServiceError, match="startup failed"):
+        McpClient("slow", config)
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(pid_file.read_text()), 0)

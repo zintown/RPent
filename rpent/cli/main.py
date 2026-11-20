@@ -111,7 +111,8 @@ def _build_argparser() -> argparse.ArgumentParser:
         description="RPent: Agentic Infrastructure for the Physical World",
         epilog="To verify the LLM backend before starting a run, use "
         "rpent-check-llm (e.g. rpent-check-llm --planner api "
-        "--model anthropic:claude-opus-4-8).",
+        "--model anthropic:claude-opus-4-8). "
+        "Use rpent mcp --help to manage external MCP servers.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         add_help=False,
     )
@@ -356,6 +357,11 @@ def _start_continuation_session(
 
 
 def main() -> int:
+    if sys.argv[1:2] == ["mcp"]:
+        from rpent.cli.mcp import main as mcp_main
+
+        return mcp_main(sys.argv[2:])
+
     parser = _build_argparser()
     # Two-phase argparse: first grab --robot / --env / --dashboard so we know
     # which robot's flags to add and whether to make its required flags optional.

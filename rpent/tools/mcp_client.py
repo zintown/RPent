@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Connect configured MCP servers to RPent tools over Streamable HTTP."""
+"""Connect configured MCP servers to RPent tools."""
 
 from __future__ import annotations
 
@@ -25,16 +25,19 @@ from contextlib import ExitStack, asynccontextmanager
 from functools import partial
 from hashlib import sha256
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlsplit
 
 import httpx
 from anyio import fail_after
 from anyio.from_thread import start_blocking_portal
+from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 from jsonschema import Draft202012Validator
 from mcp import ClientSession, types
+from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamable_http_client
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from mcp.shared.message import SessionMessage
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from rpent.tools.base import Tool, ToolResult
 
@@ -49,7 +52,12 @@ class McpServerConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid", strict=True, hide_input_in_errors=True)
 
-    url: str
+    transport: Literal["streamable-http", "stdio"] = "streamable-http"
+    url: str | None = None
+    command: str | None = None
+    args: list[str] = Field(default_factory=list)
+    cwd: str | None = None
+    env_from: list[str] = Field(default_factory=list)
     enabled: bool = True
     enabled_tools: list[str] | None = None
     startup_timeout_sec: float = Field(default=5, gt=0, allow_inf_nan=False)
@@ -58,7 +66,9 @@ class McpServerConfig(BaseModel):
 
     @field_validator("url")
     @classmethod
-    def validate_url(cls, value: str) -> str:
+    def validate_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         parsed = urlsplit(value)
         if (
             parsed.scheme not in {"http", "https"}
@@ -69,22 +79,65 @@ class McpServerConfig(BaseModel):
             raise ValueError(
                 "url must be an HTTP(S) MCP endpoint without credentials or a fragment"
             )
+        _ = parsed.port
         return value
+
+    @field_validator("env_from")
+    @classmethod
+    def validate_env_names(cls, names: list[str]) -> list[str]:
+        if any(not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) for name in names):
+            raise ValueError("env_from must contain environment variable names")
+        return names
+
+    @model_validator(mode="after")
+    def validate_transport(self) -> McpServerConfig:
+        if self.transport == "stdio":
+            if not self.command or not self.command.strip():
+                raise ValueError("stdio requires a command")
+            if self.url is not None or self.bearer_token_env_var is not None:
+                raise ValueError("url and bearer_token_env_var apply to HTTP MCP")
+        else:
+            if self.url is None:
+                raise ValueError("streamable-http requires a url")
+            if (
+                self.command is not None
+                or self.args
+                or self.cwd is not None
+                or self.env_from
+            ):
+                raise ValueError("command, args, cwd and env_from apply to stdio MCP")
+        return self
+
+
+def validate_mcp_server_name(name: str) -> str:
+    """Check the server name used in configuration and tool namespaces."""
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
+        raise ValueError(f"invalid MCP server name {name!r}")
+    return name
 
 
 def load_mcp_servers(path: Path) -> dict[str, McpServerConfig]:
     """Read server entries from a TOML configuration file."""
-    with path.expanduser().open("rb") as handle:
+    path = path.expanduser().resolve()
+    with path.open("rb") as handle:
         config = tomllib.load(handle)
+    return parse_mcp_servers(config, path)
+
+
+def parse_mcp_servers(config: dict[str, Any], path: Path) -> dict[str, McpServerConfig]:
+    """Validate an MCP configuration and resolve explicit working directories."""
     servers = config.get("mcp_servers")
     if not isinstance(servers, dict):
         raise ValueError(f"{path} must contain an [mcp_servers] table")
-    for name in servers:
-        if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
-            raise ValueError(f"invalid MCP server name {name!r}")
-    return {
-        name: McpServerConfig.model_validate(server) for name, server in servers.items()
-    }
+    result = {}
+    for name, entry in servers.items():
+        validate_mcp_server_name(name)
+        server = McpServerConfig.model_validate(entry)
+        if server.cwd is not None:
+            cwd = (path.parent / Path(server.cwd).expanduser()).resolve()
+            server = server.model_copy(update={"cwd": str(cwd)})
+        result[name] = server
+    return result
 
 
 class McpServiceError(RuntimeError):
@@ -98,39 +151,68 @@ def _error_message(error: Exception) -> str:
 
 
 @asynccontextmanager
-async def _connect(
+async def _transport(
     config: McpServerConfig, headers: dict[str, str]
-) -> AsyncIterator[tuple[ClientSession, dict[str, types.Tool]]]:
+) -> AsyncIterator[
+    tuple[
+        MemoryObjectReceiveStream[SessionMessage | Exception],
+        MemoryObjectSendStream[SessionMessage],
+    ]
+]:
+    if config.transport == "stdio":
+        environment = {}
+        for name in config.env_from:
+            if name not in os.environ:
+                raise ValueError(f"stdio requires environment variable {name}")
+            environment[name] = os.environ[name]
+        assert config.command is not None
+        params = StdioServerParameters(
+            command=config.command, args=config.args, cwd=config.cwd, env=environment
+        )
+        async with stdio_client(params) as streams:
+            yield streams
+        return
+
+    assert config.url is not None
     timeout = httpx.Timeout(config.startup_timeout_sec, read=config.tool_timeout_sec)
     async with httpx.AsyncClient(
         headers=headers, timeout=timeout, trust_env=False
     ) as http:
-        async with streamable_http_client(config.url, http_client=http) as streams:
-            read, write, _ = streams
-            async with ClientSession(read, write) as session:
-                tools: dict[str, types.Tool] = {}
-                with fail_after(config.startup_timeout_sec):
-                    info = await session.initialize()
-                    if info.capabilities.tools is not None:
-                        cursor = None
-                        seen_cursors: set[str] = set()
-                        while True:
-                            page = await session.list_tools(cursor=cursor)
-                            for definition in page.tools:
-                                if definition.name in tools:
-                                    raise ValueError(
-                                        f"duplicate MCP tool {definition.name!r}"
-                                    )
-                                tools[definition.name] = definition
-                            cursor = page.nextCursor
-                            if cursor is None:
-                                break
-                            if cursor in seen_cursors:
+        async with streamable_http_client(config.url, http_client=http) as (
+            read,
+            write,
+            _,
+        ):
+            yield read, write
+
+
+@asynccontextmanager
+async def _connect(
+    config: McpServerConfig, headers: dict[str, str]
+) -> AsyncIterator[tuple[ClientSession, dict[str, types.Tool]]]:
+    async with _transport(config, headers) as (read, write):
+        async with ClientSession(read, write) as session:
+            tools: dict[str, types.Tool] = {}
+            with fail_after(config.startup_timeout_sec):
+                info = await session.initialize()
+                if info.capabilities.tools is not None:
+                    cursor = None
+                    seen_cursors: set[str] = set()
+                    while True:
+                        page = await session.list_tools(cursor=cursor)
+                        for definition in page.tools:
+                            if definition.name in tools:
                                 raise ValueError(
-                                    "MCP server repeated a tool-list cursor"
+                                    f"duplicate MCP tool {definition.name!r}"
                                 )
-                            seen_cursors.add(cursor)
-                yield session, tools
+                            tools[definition.name] = definition
+                        cursor = page.nextCursor
+                        if cursor is None:
+                            break
+                        if cursor in seen_cursors:
+                            raise ValueError("MCP server repeated a tool-list cursor")
+                        seen_cursors.add(cursor)
+            yield session, tools
 
 
 class McpClient:

@@ -101,14 +101,37 @@ For ``--tui`` usage, see :ref:`Terminal interaction <quickstart-interactive>`.
 External MCP servers
 --------------------
 
-Pass ``--mcp-config FILE`` to load a TOML configuration. Each
-``[mcp_servers.<name>]`` entry takes a Streamable HTTP ``url``. RPent
-discovers its tool definitions at task startup, exposes them as
-``mcp__<name>__<tool>``, and closes the connection when the task ends.
+Pass ``--mcp-config FILE`` to load a TOML configuration. RPent discovers
+the tools of each enabled server at task startup and exposes them as
+``mcp__<name>__<tool>``. It closes the connections and its stdio processes
+when the task ends.
+
+Each ``[mcp_servers.<name>]`` entry selects a transport.
+
+- ``streamable-http`` is the default. Set ``url`` to the MCP endpoint and,
+  when needed, set ``bearer_token_env_var`` to the variable containing the token.
+- For ``stdio``, set ``command`` and provide ``args`` as a list of separate strings.
+  The working directory defaults to the RPent process directory. A relative
+  ``cwd`` is resolved from the configuration file. Use ``env_from`` to pass
+  additional environment variables to the child process.
 
 - ``enabled`` defaults to true. Use ``enabled_tools`` to select tools for the model.
 - ``startup_timeout_sec`` and ``tool_timeout_sec`` bound discovery and calls. They default to 5 and 10 seconds.
-- ``bearer_token_env_var`` names the environment variable containing the bearer token.
+
+Manage the configuration with ``rpent mcp``. The management commands use
+``RPENT_MCP_CONFIG`` or ``./mcp.toml`` when you omit ``--mcp-config``.
+
+.. code-block:: bash
+
+   rpent mcp --mcp-config mcp.toml add planner --url http://127.0.0.1:8790/mcp
+   rpent mcp --mcp-config mcp.toml add calculator -- python /path/to/calculator.py
+   rpent mcp --mcp-config mcp.toml list
+   rpent mcp --mcp-config mcp.toml test calculator
+   rpent mcp --mcp-config mcp.toml remove calculator
+
+``test`` opens a connection and displays the discovered tools available to RPent.
+For stdio it starts the configured executable and closes it after discovery.
+Pass the same file to the task launcher to pick up changes on the next task.
 
 .. _planner-claude-code:
 
