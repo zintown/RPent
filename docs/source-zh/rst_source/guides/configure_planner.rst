@@ -77,6 +77,20 @@ RPent 通过一个 CLI 参数选择 Agentic Planner 的后端：
 
 终端交互方式见 :ref:`终端交互 <quickstart-interactive>`。
 
+.. _planner-external-mcp:
+
+外部 MCP 服务
+--------------
+
+通过 ``--mcp-config FILE`` 加载 TOML 配置。每个
+``[mcp_servers.<name>]`` 表填写 Streamable HTTP 的 ``url``。
+RPent 在任务启动时读取服务的工具和参数定义，以
+``mcp__<name>__<tool>`` 提供给规划模型，并在任务结束时关闭连接。
+
+- ``enabled`` 默认开启。使用 ``enabled_tools`` 选择提供给模型的工具。
+- ``startup_timeout_sec`` 和 ``tool_timeout_sec`` 分别控制发现和调用的时限，默认 5 秒和 10 秒。
+- ``bearer_token_env_var`` 指定保存 Bearer Token 的环境变量名。
+
 .. _planner-claude-code:
 
 ``claude_code`` 规划器

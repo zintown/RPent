@@ -227,7 +227,7 @@ def test_dashboard_metadata_has_consistent_fields_and_runtime_components(
 def test_unitree_declares_terminal_command_delivery_capabilities() -> None:
     spec = get_robot_spec("unitree")
     assert spec.is_real_robot
-    assert spec.dashboard is None
+    assert spec.resolve_dashboard is None
     assert not spec.supports_exploration
     assert spec.run_flash is None
 

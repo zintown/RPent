@@ -161,7 +161,6 @@ class VlnNavigation:
         timeout_s: float,
         expected_goal: dict[str, float] | None,
         check_cancelled: Callable[[], None],
-        on_started: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         """Execute one episode; model STOP alone leaves spatial success unverified."""
         if (
@@ -249,8 +248,6 @@ class VlnNavigation:
                         break
                     self._cancelled.wait(0.05)
                 self._publish(state="observing", control=control)
-                if on_started is not None:
-                    on_started(self.snapshot())
                 predictions = references = stale = consecutive_stale = 0
                 last_stamp = None
                 sequence = 0

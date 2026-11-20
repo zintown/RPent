@@ -26,9 +26,11 @@ import threading
 import time
 import traceback
 from collections.abc import Iterable
+from contextlib import ExitStack
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
+from jsonschema import Draft202012Validator
 from pydantic import ValidationError
 
 from rpent.dashboard.events import DashboardEventSink, StepRecordEvent
@@ -41,6 +43,7 @@ logger = get_logger("toolkit")
 if TYPE_CHECKING:
     from rpent.memory.manager import MemoryManager
     from rpent.session import EnvState, StepRecord
+    from rpent.tools.mcp_client import McpServerConfig
 
 
 @dataclass(eq=False)
@@ -145,12 +148,15 @@ class Toolkit:
         dashboard_events: DashboardEventSink,
         state: Any = None,
         memory: "MemoryManager",
+        require_finish: bool = False,
     ) -> None:
         self._tools: dict[str, Tool] = {}
         self._dashboard_events = dashboard_events
         self._state = state
         self._memory = memory
+        self.require_finish = require_finish
         self._scheduler = _Scheduler()
+        self._mcp_connections = ExitStack()
         self._register_common_tools()
 
     # ------------------------------------------------------------------
@@ -175,6 +181,18 @@ class Toolkit:
         """Register declarations collected from explicitly chosen tool owners."""
         for tool in tools:
             self.add_tool(tool)
+
+    def add_mcp_tools(self, servers: dict[str, McpServerConfig]) -> None:
+        """Connect configured servers and bind their tools to this toolkit."""
+        from rpent.tools.mcp_client import discover_mcp_tools
+
+        with ExitStack() as connections:
+            tools = discover_mcp_tools(servers, connections, self.raise_if_cancelled)
+            names = [tool.name for tool in tools]
+            if len(set(names)) != len(names) or self._tools.keys() & set(names):
+                raise ValueError("MCP tool names collide in the toolkit")
+            self.add_tools(tools)
+            self._mcp_connections.enter_context(connections.pop_all())
 
     def _register_common_tools(self) -> None:
         from rpent.tools.common import CommonTools
@@ -209,7 +227,9 @@ class Toolkit:
     def list_tools(self) -> tuple[Tool, ...]:
         """Return the native declarations with run-specific descriptions resolved."""
         return tuple(
-            replace(tool, description=substitute(tool.description))
+            tool
+            if tool.args_schema is None
+            else replace(tool, description=substitute(tool.description))
             for tool in self._tools.values()
         )
 
@@ -218,22 +238,33 @@ class Toolkit:
         tool = self._tools.get(name)
         if tool is None:
             return ToolResult(data={"error": f"unknown tool: {name}"})
-        try:
-            parameters = tool.args_schema.model_validate(input_dict, strict=True)
-        except ValidationError as exc:
-            return ToolResult(
-                data={
-                    "error": f"bad arguments for {name}",
-                    "errors": exc.errors(
-                        include_url=False,
-                        include_context=False,
-                        include_input=False,
-                    ),
-                }
+        if tool.args_schema is None:
+            error = next(
+                Draft202012Validator(tool.input_schema).iter_errors(input_dict), None
             )
-        kwargs = {
-            field: getattr(parameters, field) for field in type(parameters).model_fields
-        }
+            if error is not None:
+                return ToolResult(
+                    data={"error": f"bad arguments for {name}: {error.message}"}
+                )
+            kwargs = input_dict
+        else:
+            try:
+                parameters = tool.args_schema.model_validate(input_dict, strict=True)
+            except ValidationError as exc:
+                return ToolResult(
+                    data={
+                        "error": f"bad arguments for {name}",
+                        "errors": exc.errors(
+                            include_url=False,
+                            include_context=False,
+                            include_input=False,
+                        ),
+                    }
+                )
+            kwargs = {
+                field: getattr(parameters, field)
+                for field in type(parameters).model_fields
+            }
 
         try:
             operation = self._scheduler.acquire(readonly=tool.readonly)
@@ -268,7 +299,7 @@ class Toolkit:
                     data={"error": str(exc), "traceback": traceback.format_exc()}
                 )
 
-            if not tool.readonly:
+            if not tool.readonly and tool.capture_state:
                 elapsed_s = round(time.perf_counter() - started, 2)
                 result_dict = native.to_dict()
                 command = {"action": name, **input_dict}
@@ -351,7 +382,10 @@ class Toolkit:
     def close(self) -> None:
         """Close admission and drain calls before subclasses release resources."""
         self._scheduler.cancel(close=True)
-        self.cancel_active_and_wait()
+        try:
+            self.cancel_active_and_wait()
+        finally:
+            self._mcp_connections.close()
 
     def exploration_continuation(self, *, explicit: bool = False) -> str | None:
         """Return a rule-checked continuation at an idle planner boundary."""

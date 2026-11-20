@@ -22,15 +22,14 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
-from robots.unitree.frontend_client import FrontendTaskClient
-from robots.unitree.http_client import ServiceError, finite_number, map_identity
+from robots.unitree.http_client import ServiceError, map_identity
 from robots.unitree.navigation_client import (
     CoordinateGoal,
     NavigationClient,
     NavigationGoal,
 )
 from robots.unitree.observation_client import ObservationClient
-from robots.unitree.simulation_client import SimulationClient, validate_pose
+from robots.unitree.simulation_client import SimulationClient, validate_walk_arrival
 from robots.unitree.vln_client import VlnClient
 from robots.unitree.vln_navigation import VlnNavigation
 from rpent.dashboard.events import DashboardEventSink
@@ -62,7 +61,6 @@ class UnitreeMujocoToolkit(Toolkit):
         state_output_dir: Path,
         navigation_timeout_s: float = 300.0,
         poll_interval_s: float = 5.0,
-        frontend: FrontendTaskClient | None = None,
         vln: VlnClient | None = None,
         observation: ObservationClient | None = None,
         vln_timeout_s: float = 120.0,
@@ -74,12 +72,6 @@ class UnitreeMujocoToolkit(Toolkit):
         self._timeout_s, self._poll_s = navigation_timeout_s, poll_interval_s
         self._artifacts = state_output_dir / "navigation"
         self._plans: dict[str, dict[str, Any]] = {}
-        self._frontend = frontend
-        self._plan_subtasks: dict[str, str] = {}
-        self._completed_subtasks: set[str] = set()
-        self._submitted_subtasks: set[str] = set()
-        self._next_subtask_index = 0
-        self._repeat_from: int | None = None
         self._completed_plans: set[str] = set()
         self._failed_previews: set[str] = set()
         self._lock = threading.RLock()
@@ -131,8 +123,6 @@ class UnitreeMujocoToolkit(Toolkit):
             self.add_tools(
                 (self.run_vln_navigation, self.get_vln_status, self.stop_vln_navigation)
             )
-        if frontend is not None:
-            self.add_tool(self.register_navigation_subtasks)
         with self.state.record_step(state=self._state_summary()):
             pass
         self._publish_step(self.state.get())
@@ -156,73 +146,7 @@ class UnitreeMujocoToolkit(Toolkit):
                     or vln["submission_uncertain"],
                     stop_error=self._stop_error or vln["stop_error"],
                 )
-            if self._frontend is not None:
-                summary["frontend"] = {
-                    "task_id": self._frontend.task_id,
-                    "sub_tasks": copy.deepcopy(self._frontend.subtasks),
-                    "completed_sub_task_ids": sorted(self._completed_subtasks),
-                    "next_sub_task_id": self._next_subtask_id(),
-                    "repeat_from": self._repeat_from,
-                    "error": self._frontend.error,
-                }
             return summary
-
-    @tool
-    def register_navigation_subtasks(
-        self, commands: list[str], repeat_from: int | None = None
-    ) -> ToolResult:
-        """Register the complete ordered destination list before planning movement.
-
-        Args:
-            commands: One natural-language navigation command per destination,
-                including verification of arrival. Preserve the requested order.
-            repeat_from: For an explicitly requested patrol, repeat the suffix
-                starting at this 1-based command index. Use 1 for two-point
-                continuous patrol, or omit for a finite destination list.
-        """
-        if self._frontend is None:
-            raise ValueError("frontend callbacks are not configured")
-        if repeat_from is not None and (
-            type(repeat_from) is not int or not 1 <= repeat_from <= len(commands)
-        ):
-            raise ValueError("repeat_from must be a command index from 1 through N")
-        subtasks = self._frontend.register_subtasks(commands)
-        with self._lock:
-            self._repeat_from = repeat_from
-        return ToolResult(
-            data={
-                "task_id": self._frontend.task_id,
-                "sub_tasks": subtasks,
-                "repeat_from": self._repeat_from,
-                "next_sub_task_id": self._next_subtask_id(),
-            }
-        )
-
-    def _next_subtask_id(self) -> str | None:
-        if self._frontend is None or self._next_subtask_index >= len(
-            self._frontend.subtasks
-        ):
-            return None
-        return self._frontend.subtasks[self._next_subtask_index]["sub_task_id"]
-
-    def _require_subtask(self, sub_task_id: str | None) -> None:
-        if self._frontend is None:
-            if sub_task_id is not None:
-                raise ValueError("sub_task_id requires frontend callbacks")
-            return
-        self._frontend.raise_if_failed()
-        with self._lock:
-            next_id = self._next_subtask_id()
-            if next_id is None:
-                raise ValueError(
-                    "register subtasks first, or finish if all are complete"
-                )
-            if sub_task_id != next_id:
-                raise ValueError(f"use the next registered sub_task_id: {next_id}")
-            if sub_task_id in self._submitted_subtasks:
-                raise ServiceError(
-                    "this subtask was already submitted; do not repeat motion"
-                )
 
     def _ready(self) -> tuple[str, str]:
         nav = self._nav.health()
@@ -267,45 +191,26 @@ class UnitreeMujocoToolkit(Toolkit):
         self,
         goals: list[NavigationGoal],
         step: float | None = None,
-        sub_task_id: str | None = None,
     ) -> ToolResult:
         """Plan from a fresh simulator pose and save the unmodified route.
 
         Args:
             goals: Ordered waypoint names/ids or map-coordinate objects. Use one goal per executable plan.
             step: Optional dense-path spacing in meters; not a motion speed.
-            sub_task_id: Next registered frontend subtask ID, required in callback mode.
         """
-        self._require_subtask(sub_task_id)
-        if self._frontend is not None and len(goals) != 1:
-            raise ValueError("frontend subtasks require one goal per plan")
         identity = self._ready()
         pose = self._pose()
         if pose["fallen"]:
             raise ServiceError("robot has fallen; simulator recovery is required")
-        plan = None
-        try:
-            plan = self._nav.plan(pose, goals, step=step)
-            if map_identity(plan) != identity:
-                raise ServiceError(
-                    "map changed during planning; query the services again"
-                )
-        except ServiceError as exc:
-            if self._frontend is not None:
-                self._frontend.report(
-                    sub_task_id, "astar", plan, plan_id=None, error=str(exc)
-                )
-            raise
+        plan = self._nav.plan(pose, goals, step=step)
+        if map_identity(plan) != identity:
+            raise ServiceError("map changed during planning; query the services again")
         plan_id = "plan_" + uuid4().hex[:12]
         destination = self._artifacts / "plans" / f"{plan_id}.json"
         destination.parent.mkdir(parents=True, exist_ok=True)
         write_json_atomic(destination, plan)
         with self._lock:
             self._plans[plan_id] = plan
-            if sub_task_id is not None:
-                self._plan_subtasks[plan_id] = sub_task_id
-        if self._frontend is not None:
-            self._frontend.report(sub_task_id, "astar", plan, plan_id=plan_id)
         return ToolResult(
             data={
                 "ok": True,
@@ -317,7 +222,6 @@ class UnitreeMujocoToolkit(Toolkit):
                 "warnings": plan.get("warnings", []),
                 "plan_file": str(destination),
                 "executable": len(plan["legs"]) == 1,
-                **({"sub_task_id": sub_task_id} if sub_task_id is not None else {}),
             }
         )
 
@@ -434,39 +338,6 @@ class UnitreeMujocoToolkit(Toolkit):
         self._stop_error = None
         return True
 
-    @staticmethod
-    def _validate_arrival(status: dict[str, Any], plan: dict[str, Any]) -> None:
-        result = status.get("result")
-        if (
-            status.get("fell") is not False
-            or not isinstance(result, dict)
-            or result.get("ok") is not True
-            or not isinstance(result.get("legs"), list)
-            or len(result["legs"]) != 1
-            or not isinstance(result["legs"][0], dict)
-            or result["legs"][0].get("reached") is not True
-        ):
-            raise ServiceError("walk finished without confirmed arrival at the goal")
-        leg = result["legs"][0]
-        position_error = finite_number(leg.get("position_error"), "position_error")
-        if not 0 <= position_error <= 0.25 + 1e-9:
-            raise ServiceError("navigation position error exceeds 0.25 m")
-        pose = status.get("pose")
-        validate_pose(pose)
-        if pose["fallen"]:
-            raise ServiceError("robot has fallen")
-        goal = plan["legs"][0]["goal"]["stand_pose"]
-        if math.hypot(pose["x"] - goal["x"], pose["y"] - goal["y"]) > 0.25 + 1e-9:
-            raise ServiceError("final pose is outside the navigation goal tolerance")
-        if goal.get("yaw") is not None:
-            yaw_error = finite_number(leg.get("yaw_error"), "yaw_error")
-            actual_error = math.atan2(
-                math.sin(pose["yaw"] - goal["yaw"]),
-                math.cos(pose["yaw"] - goal["yaw"]),
-            )
-            if max(abs(yaw_error), abs(actual_error)) > 0.2 + 1e-9:
-                raise ServiceError("navigation yaw error exceeds 0.2 radians")
-
     @tool
     def follow_navigation(self, plan_id: str) -> ToolResult:
         """Execute one saved single-goal route and wait for settled arrival.
@@ -481,8 +352,6 @@ class UnitreeMujocoToolkit(Toolkit):
                 "VLN control is active or uncertain; release it before following an A* route"
             )
         plan = self._plan(plan_id)
-        sub_task_id = self._plan_subtasks.get(plan_id)
-        self._require_subtask(sub_task_id)
         if len(plan["legs"]) != 1:
             raise ValueError("follow one goal at a time to preserve ordered arrival")
         with self._lock:
@@ -516,8 +385,6 @@ class UnitreeMujocoToolkit(Toolkit):
             self.raise_if_cancelled()
             # A timeout or malformed acceptance may follow a remotely started walk.
             self._submission_uncertain = True
-            if sub_task_id is not None:
-                self._submitted_subtasks.add(sub_task_id)
             accepted = self._sim.start_walk(plan)
             with self._lock:
                 self._active_walk_id = accepted["walk_id"]
@@ -525,14 +392,6 @@ class UnitreeMujocoToolkit(Toolkit):
                 self._stop_requested = False
                 self._stop_error = None
                 self._last_walk = None
-            if self._frontend is not None:
-                self._frontend.report(
-                    sub_task_id,
-                    "walk_accepted",
-                    accepted,
-                    plan_id=plan_id,
-                    navigation_completed=False,
-                )
             while True:
                 self.raise_if_cancelled()
                 if time.monotonic() >= deadline:
@@ -540,28 +399,10 @@ class UnitreeMujocoToolkit(Toolkit):
                 status = self._observe_walk()
                 self.raise_if_cancelled()
                 if status["state"] == "finished":
-                    self._validate_arrival(status, plan)
+                    validate_walk_arrival(status, plan)
                     with self._lock:
                         self._completed += 1
                         self._completed_plans.add(plan_id)
-                        if sub_task_id is not None:
-                            self._completed_subtasks.add(sub_task_id)
-                            self._submitted_subtasks.discard(sub_task_id)
-                            self._next_subtask_index += 1
-                            if (
-                                self._repeat_from is not None
-                                and self._next_subtask_index
-                                == len(self._frontend.subtasks)
-                            ):
-                                self._next_subtask_index = self._repeat_from - 1
-                    if self._frontend is not None:
-                        self._frontend.report(
-                            sub_task_id,
-                            "walk_finished",
-                            status,
-                            plan_id=plan_id,
-                            navigation_completed=True,
-                        )
                     return ToolResult(
                         data={
                             "ok": True,
@@ -572,11 +413,6 @@ class UnitreeMujocoToolkit(Toolkit):
                             "result": status["result"],
                             "pose": status["pose"],
                             "report_file": str(destination),
-                            **(
-                                {"next_sub_task_id": self._next_subtask_id()}
-                                if self._frontend is not None
-                                else {}
-                            ),
                         }
                     )
                 self._cancelled.wait(
@@ -588,27 +424,10 @@ class UnitreeMujocoToolkit(Toolkit):
         finally:
             if self._active_walk_id is not None:
                 self._stop_and_confirm()
-            if (
-                self._frontend is not None
-                and self._last_error is not None
-                and self._frontend.error is None
-            ):
-                try:
-                    self._frontend.report(
-                        sub_task_id,
-                        "walk_error",
-                        self._last_walk,
-                        plan_id=plan_id,
-                        error=self._last_error,
-                        navigation_completed=False,
-                    )
-                except ServiceError as exc:
-                    logger.error("Cannot report navigation failure: %s", exc)
             write_json_atomic(
                 destination,
                 {
                     "plan_id": plan_id,
-                    **({"sub_task_id": sub_task_id} if sub_task_id is not None else {}),
                     **self._state_summary(),
                     "walk": self._last_walk,
                 },
@@ -620,7 +439,6 @@ class UnitreeMujocoToolkit(Toolkit):
         instruction: str,
         expected_goal: CoordinateGoal | None = None,
         timeout_s: float | None = None,
-        sub_task_id: str | None = None,
     ) -> ToolResult:
         """Run image-based LightNav navigation, waiting internally for stopping and cleanup.
 
@@ -628,13 +446,11 @@ class UnitreeMujocoToolkit(Toolkit):
             instruction: The complete visual navigation instruction for LightNav.
             expected_goal: Optional known map pose for independent arrival verification. Without it, model STOP yields verification_required, never verified success.
             timeout_s: Episode budget in seconds, at most the configured VLN timeout.
-            sub_task_id: Next registered frontend subtask ID, required in callback mode.
         """
         if self._vln is None:
             raise ServiceError(
                 "VLN is not configured; set --vln-endpoint and --observation-endpoint"
             )
-        self._require_subtask(sub_task_id)
         if self._active_walk_id is not None or self._submission_uncertain:
             raise ServiceError("a route is active or uncertain; do not start VLN")
         budget = self._vln_timeout_s if timeout_s is None else timeout_s
@@ -644,19 +460,6 @@ class UnitreeMujocoToolkit(Toolkit):
             )
         self._motion_attempted = True
         self._last_error = None
-        if sub_task_id is not None:
-            self._submitted_subtasks.add(sub_task_id)
-
-        def started(state: dict[str, Any]) -> None:
-            if self._frontend is not None:
-                self._frontend.report(
-                    sub_task_id,
-                    "vln_started",
-                    state,
-                    plan_id=None,
-                    navigation_completed=False,
-                )
-
         try:
             result = self._vln.run(
                 instruction,
@@ -665,56 +468,16 @@ class UnitreeMujocoToolkit(Toolkit):
                 if expected_goal is None
                 else expected_goal.model_dump(exclude_none=True),
                 check_cancelled=self.raise_if_cancelled,
-                on_started=started,
             )
             with self._lock:
                 self._last_pose = result.get("pose")
                 if result["goal_verified"]:
                     self._completed += 1
-                    if sub_task_id is not None:
-                        self._completed_subtasks.add(sub_task_id)
-                        self._submitted_subtasks.discard(sub_task_id)
-                        self._next_subtask_index += 1
-                        if (
-                            self._repeat_from is not None
-                            and self._next_subtask_index == len(self._frontend.subtasks)
-                        ):
-                            self._next_subtask_index = self._repeat_from - 1
                 else:
                     self._unverified_vln = True
-            if self._frontend is not None:
-                self._frontend.report(
-                    sub_task_id,
-                    "vln_finished",
-                    result,
-                    plan_id=None,
-                    navigation_completed=result["goal_verified"],
-                )
-            return ToolResult(
-                data={
-                    "ok": True,
-                    **result,
-                    **(
-                        {"next_sub_task_id": self._next_subtask_id()}
-                        if self._frontend is not None
-                        else {}
-                    ),
-                }
-            )
+            return ToolResult(data={"ok": True, **result})
         except (ServiceError, TimeoutError, ToolCancelled) as exc:
             self._last_error = str(exc)
-            if self._frontend is not None and self._frontend.error is None:
-                try:
-                    self._frontend.report(
-                        sub_task_id,
-                        "vln_error",
-                        self._vln.snapshot(),
-                        plan_id=None,
-                        error=str(exc),
-                        navigation_completed=False,
-                    )
-                except ServiceError as callback_error:
-                    logger.error("Cannot report VLN failure: %s", callback_error)
             raise
 
     @tool(readonly=True)
@@ -793,25 +556,6 @@ class UnitreeMujocoToolkit(Toolkit):
                     "error": "VLN goal has not been independently verified or its control is still active"
                 }
             )
-        if status == "success" and self._repeat_from is not None:
-            return ToolResult(
-                data={
-                    "error": "continuous patrol remains active until the request budget, timeout, cancellation, or failure ends it",
-                    "next_sub_task_id": self._next_subtask_id(),
-                }
-            )
-        if (
-            status == "success"
-            and self._frontend is not None
-            and (
-                self._frontend.error is not None
-                or not self._frontend.subtasks
-                or len(self._completed_subtasks) != len(self._frontend.subtasks)
-            )
-        ):
-            return ToolResult(
-                data={"error": "registered subtasks or callbacks are incomplete"}
-            )
         if (
             status == "success"
             and self._motion_attempted
@@ -876,8 +620,6 @@ class UnitreeMujocoToolkit(Toolkit):
                     try:
                         if self._vln is not None:
                             self._vln.model.close()
+                    finally:
                         if self._observation is not None:
                             self._observation.close()
-                    finally:
-                        if self._frontend is not None:
-                            self._frontend.close()

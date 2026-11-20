@@ -14,7 +14,6 @@
 
 """Exercise HTTP requests and real owned subprocesses without network or motion."""
 
-import asyncio
 import json
 import os
 import shlex
@@ -26,13 +25,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import httpx
-
 from robots.unitree.task_server import (
     RunRequest,
     TaskConflict,
     TaskRunner,
-    create_app,
     main,
 )
 
@@ -57,7 +53,6 @@ navigation = {
     "active_walk_id": None,
     "submission_uncertain": mode == "uncertain",
     "stop_error": None,
-    "frontend": {"task_id": sys.argv[1], "sub_tasks": [{"sub_task_id": "child-1"}]},
 }
 (output / "states.json").write_text(json.dumps({"steps": [{"state": navigation}]}))
 if mode == "real-unresolved":
@@ -175,7 +170,7 @@ class TaskServerTest(unittest.TestCase):
 
     def test_unconfirmed_real_motion_blocks_later_tasks(self):
         os.environ["RPENT_TEST_MODE"] = "real-unresolved"
-        runner = self.runner(task_reporting="local")
+        runner = self.runner()
         runner.start(RunRequest(task_id="parent-1", task_name="test"))
         result = self.wait_finished(runner)
         self.assertEqual(result["status"], "requires_attention")
@@ -186,7 +181,7 @@ class TaskServerTest(unittest.TestCase):
         with self.assertRaises(TaskConflict):
             runner.start(RunRequest(task_id="next-real", task_name="test"))
 
-    def test_http_runner_uses_the_existing_launch_script(self):
+    def test_runner_uses_the_existing_launch_script(self):
         repo = Path(__file__).resolve().parents[4]
         shutil.copyfile(repo / "run_rpent.sh", self.root / "run_rpent.sh")
         python = self.root / ".venv" / "bin" / "python"
@@ -201,7 +196,7 @@ if sys.argv[1] == "-c":
 assert sys.stdin.isatty()
 assert sys.argv[1:3] == ["-m", "rpent.cli.main"]
 parser = argparse.ArgumentParser()
-for option in ("--output-dir", "--task", "--frontend-task-id"):
+for option in ("--output-dir", "--task"):
     parser.add_argument(option)
 args, _ = parser.parse_known_args(sys.argv[3:])
 Path("actual-args.json").write_text(json.dumps(vars(args)))
@@ -228,7 +223,6 @@ Path("actual-args.json").write_text(json.dumps(vars(args)))
         self.assertEqual(result["status"], "succeeded")
         args = json.loads((self.root / "actual-args.json").read_text())
         self.assertEqual(args["task"], text)
-        self.assertEqual(args["frontend_task_id"], "parent-1")
         self.assertEqual(args["output_dir"], result["output_dir"])
 
     def test_only_one_child_and_stop_uses_graceful_sigint(self):
@@ -271,7 +265,6 @@ Path("actual-args.json").write_text(json.dumps(vars(args)))
         os.utime(report_path, ns=(state_time + 1, state_time + 1))
         navigation = runner.get("parent-1")["navigation"]
         self.assertEqual(navigation["completed_navigation_goals"], 4)
-        self.assertEqual(navigation["frontend"]["task_id"], "parent-1")
         state["steps"][-1]["state"].update(
             completed_navigation_goals=5, error="new error"
         )
@@ -326,111 +319,19 @@ Path("actual-args.json").write_text(json.dumps(vars(args)))
             restored.start(RunRequest(task_id="parent-2", task_name="test"))
         self.assertEqual(restored.health()["attention_task_ids"], ["parent-1"])
 
-    def test_http_validation_auth_status_logs_and_idempotency(self):
-        async def scenario():
-            # Periodic timers also let this run in sandboxes without socketpair wakeups.
-            loop = asyncio.get_running_loop()
-
-            def tick():
-                loop.call_later(0.01, tick)
-
-            tick()
-            app = create_app(
-                repo_root=self.root, jobs_dir=self.jobs, token="test-token"
-            )
-            async with app.router.lifespan_context(app):
-                async with httpx.AsyncClient(
-                    transport=httpx.ASGITransport(app=app),
-                    base_url="http://runner.test",
-                ) as client:
-                    self.assertEqual((await client.get("/healthz")).status_code, 200)
-                    body = {"task_id": "parent-1", "task_name": "广告牌 → 母婴室"}
-                    self.assertEqual(
-                        (await client.post("/api/rpend/run", json=body)).status_code,
-                        401,
-                    )
-                    client.headers["Authorization"] = "Bearer test-token"
-                    self.assertEqual(
-                        (await client.get("/api/rpend/run/missing")).status_code, 404
-                    )
-                    for invalid in (
-                        {**body, "task_id": "../escape"},
-                        {**body, "task_id": 123},
-                        {**body, "task_name": "  "},
-                        {**body, "command": "touch injected"},
-                    ):
-                        self.assertEqual(
-                            (
-                                await client.post("/api/rpend/run", json=invalid)
-                            ).status_code,
-                            422,
-                        )
-                    started = await client.post("/api/rpend/run", json=body)
-                    self.assertEqual(started.status_code, 202)
-                    duplicate = await client.post("/api/rpend/run", json=body)
-                    self.assertEqual(duplicate.status_code, 200)
-                    self.assertEqual(duplicate.json()["pid"], started.json()["pid"])
-                    conflict = await client.post(
-                        "/api/rpend/run", json={**body, "task_name": "different"}
-                    )
-                    self.assertEqual(conflict.status_code, 409)
-                    for _ in range(300):
-                        status = await client.get(started.json()["status_url"])
-                        if status.json()["status"] == "succeeded":
-                            break
-                        await asyncio.sleep(0.01)
-                    self.assertEqual(status.json()["status"], "succeeded")
-                    logs = await client.get(
-                        started.json()["logs_url"] + "?tail_bytes=8"
-                    )
-                    self.assertEqual(logs.status_code, 200)
-                    self.assertLessEqual(len(logs.json()["text"]), 8)
-                    self.assertEqual(
-                        (
-                            await client.get(
-                                started.json()["logs_url"] + "?tail_bytes=999999"
-                            )
-                        ).status_code,
-                        422,
-                    )
-                    stopped = await client.post(started.json()["stop_url"])
-                    self.assertEqual(stopped.json()["status"], "succeeded")
-                    os.environ["RPENT_TEST_MODE"] = "wait"
-                    second = await client.post(
-                        "/api/rpend/run", json={**body, "task_id": "parent-2"}
-                    )
-                    self.assertEqual(second.status_code, 202)
-                    for _ in range(300):
-                        if (self.root / "ready").exists():
-                            break
-                        await asyncio.sleep(0.01)
-                    self.assertTrue((self.root / "ready").exists())
-                    busy = await client.post(
-                        "/api/rpend/run", json={**body, "task_id": "parent-3"}
-                    )
-                    self.assertEqual(busy.status_code, 409)
-                    stopping = await client.post(second.json()["stop_url"])
-                    self.assertEqual(stopping.json()["status"], "stopping")
-                    for _ in range(300):
-                        ended = await client.get(second.json()["status_url"])
-                        if ended.json()["status"] == "stopped":
-                            break
-                        await asyncio.sleep(0.01)
-                    self.assertEqual(ended.json()["status"], "stopped")
-                    with patch(
-                        "subprocess.Popen", side_effect=OSError("test launch failure")
-                    ):
-                        failed = await client.post(
-                            "/api/rpend/run", json={**body, "task_id": "parent-3"}
-                        )
-                    self.assertEqual(failed.status_code, 503)
-                    failed_again = await client.post(
-                        "/api/rpend/run", json={**body, "task_id": "parent-3"}
-                    )
-                    self.assertEqual(failed_again.status_code, 200)
-                    self.assertEqual(failed_again.json()["status"], "failed")
-
-        asyncio.run(scenario())
+    def test_failed_launch_is_recorded_and_not_retried_with_the_same_id(self):
+        runner = self.runner()
+        request = RunRequest(task_id="task-1", task_name="go")
+        with patch(
+            "subprocess.Popen", side_effect=OSError("test launch failure")
+        ) as spawn:
+            with self.assertRaisesRegex(OSError, "test launch failure"):
+                runner.start(request)
+            record, created = runner.start(request)
+        self.assertFalse(created)
+        self.assertEqual(record["status"], "failed")
+        self.assertEqual(record["error"], "test launch failure")
+        spawn.assert_called_once()
 
     def test_public_binding_requires_server_side_token(self):
         with patch.dict(os.environ, {"RPENT_RUNNER_TOKEN": ""}):

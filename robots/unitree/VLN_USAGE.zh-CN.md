@@ -15,7 +15,7 @@ A* 继续负责地图路径规划；同一台 Go2 每次只执行一种导航方
 | A* | `http://127.0.0.1:8765` | 点位查询、地图路径规划 |
 | Go2 控制 | `http://127.0.0.1:8770` | `/walk` 或持续航点会话 |
 | Go2 观测 | `http://127.0.0.1:8771` | `/observation`、`/camera/front` |
-| RPent HTTP | `http://127.0.0.1:8780` | 提交任务、查询进度、日志和取消 |
+| RPent 任务 MCP | `http://127.0.0.1:8780/mcp/` | DSH 提交任务、查询进度、读取日志和取消 |
 
 现有推理依赖、Go2 仿真和 A* 应已准备好。已有共享环境时，仅需注册本地包：
 
@@ -54,11 +54,9 @@ RPent 的 `--vln-endpoint` 也要使用相同配置。停止命令只结束本�
 仿真、A* 和 RPent 使用各自原有启停入口。模型服务关闭时，活动 VLN 工具会尝试
 确认停车；不能确认时保留待核对状态，禁止自动重放运动。
 
-## 接入 RPent 和前端
+## 通过 DSH 下发 VLN 任务
 
-原有父任务、子任务和 Bearer 认证协议保持不变，见
-[前端接口说明](FRONTEND_USAGE.zh-CN.md)。本机提供一个配置片段，复用原有
-`.env.frontend-local` 和私有 `.env.local`，再增加 VLN 与观测地址：
+本机配置片段读取私有 `.env.local`，设置 `mujoco` 模式及 LightNav、观测和仿真地址。在 RPent 机器上执行。
 
 ```bash
 cd /home/yanlinjie/robot_project/rpent
@@ -66,18 +64,13 @@ set -a
 source robots/unitree/vln_local.env
 set +a
 ../.venv/bin/python -m robots.unitree.task_server \
-  --host 127.0.0.1 --port 8780 --jobs-dir output/frontend-integration/jobs
+  --host 127.0.0.1 --port 8780 --robot-id go2-01 \
+  --jobs-dir output/vln-integration/jobs
 ```
 
-已有任务服务时应先正常结束旧进程，避免争抢端口和 jobs 目录锁。服务只监听
-本机；远端访问沿用已有的私有连接方式。
-前台启动的任务服务使用 Ctrl+C 关闭，会先清理自有控制。当前后台实例的 PID
-保存在 `output/frontend-integration/task-server.pid`，日志在项目根目录
-`output/vln-integration/task-server.log`；关闭服务前应让正在执行的任务正常停止。
+上例为本机监听。DSH 部署在另一台服务器时，按 [任务 MCP 服务](TASK_MCP.zh-CN.md)设置 RPent 的监听地址、可信 Host 和令牌。前台进程用 Ctrl+C 退出，退出前清理其拥有的任务和控制。
 
-前端仍向 `POST /api/rpend/run` 提交 `task_id`、`task_name`，并轮询
-`GET /api/rpend/run/{task_id}`。例如“使用 VLN 保持当前地图位置并确认停车”会让
-RPent 读取当前位置，将它作为已知验收坐标，再调用 VLN。
+DSH 可以提交“使用 VLN 保持当前地图位置并确认停车”。RPent 读取当前位置，将它作为已知验收坐标，再调用 VLN。DSH 可通过同一 MCP 服务查询结果或请求停止。
 
 默认调度先解析目标区域、物体和验收条件：已知地图站位使用 A*；
 “前往某个房间寻找物体”拆成 A* 到房间、确认停车、VLN 局部搜索两个阶段。
@@ -86,20 +79,20 @@ RPent 读取当前位置，将它作为已知验收坐标，再调用 VLN。
 一个已有唯一完整名称的“客厅”变成歧义。确实无法解析区域时报告缺少信息。
 
 明确要求“仅使用 VLN”时保留完整视觉路线；明确要求“仅使用 A*”时不会增加
-视觉搜索。两个阶段使用不同的前端子任务编号，在运动前一次登记。
+视觉搜索。
 传给 LightNav 的是当前 VLN 阶段的指令，省略已经完成的区域导航。
 局部搜索通常先给 30 秒，且不超过配置的单次 VLN 上限；一次失败后不重复
 提交同一阶段，也不切换算法绕过失败状态。
 
 这些规则由 `prompt_bundle.py` 的 MuJoCo system prompt 提供。
-每个 HTTP 新任务会启动新的 RPent 子进程并读取提示词，修改后对新任务生效；
+每条新任务会启动新的 RPent 子进程并读取提示词，修改后对新任务生效；
 正在运行的任务仍使用原提示词，8780 任务服务无需为此重启。
 本地配置同时设置单段 A* 预算 300 秒、整任务规划预算 900 秒、最多 16 次模型请求；
 这些值由每个新任务的启动脚本重新读取。VLN 单次最大预算仍为 120 秒。
 房间边界监控和视觉目标的独立验收仍需要工具层支持；提示词中的局部搜索要求
 不能保证机器人始终留在指定房间，地图站位验收也不能代替视觉识别证据。
 
-不使用 HTTP 启动服务时，CLI 在原 MuJoCo 参数上增加：
+也可在终端直接测试。RPent CLI 在 `--unitree-mode mujoco` 上增加以下参数。
 
 ```text
 --vln-endpoint ws://127.0.0.1:8050
@@ -114,7 +107,7 @@ RPent 读取当前位置，将它作为已知验收坐标，再调用 VLN。
 
 | 工具 | 行为 |
 | --- | --- |
-| `run_vln_navigation(instruction, expected_goal=None, timeout_s=None, sub_task_id=None)` | 一次调用内部循环，直到目标验收、模型 STOP、取消或失败 |
+| `run_vln_navigation(instruction, expected_goal=None, timeout_s=None)` | 一次调用内部循环，直到目标验收、模型 STOP、取消或失败 |
 | `get_vln_status()` | 最近一次会话、预测数量、控制权和停车证据 |
 | `stop_vln_navigation()` | 结束本工具拥有的控制会话并确认停车 |
 
@@ -140,10 +133,9 @@ RPent 读取当前位置，将它作为已知验收坐标，再调用 VLN。
 没有已知验收坐标时，模型 STOP 后会停车并返回 `verification_required`，
 不会把它计入已验证目标或允许 RPent 报成功。上层任务应说明目标仍待验证。
 
-## 前端状态字段
+## MCP 任务状态
 
-活动工具会持续原子写入 `navigation/vln/latest.json`，HTTP 查询将它合并到
-`navigation.vln`，无需等待长工具调用结束：
+活动工具持续写入 `navigation/vln/latest.json`。MCP 的 `get_robot_task` 在任务运行期间也可读取 `navigation.vln`。
 
 ```json
 {
@@ -170,13 +162,7 @@ RPent 读取当前位置，将它作为已知验收坐标，再调用 VLN。
 及停车均通过。`control` 内有仿真步态、MPC 和实测运动反馈；`latest_frame` 是
 本地诊断文件路径，浏览器实时画面仍使用 8771 的第一视角接口。
 
-已有子任务回调增加 `vln_started`、`vln_finished`、`vln_error` 三个 stage，
-仍使用 `{data: {...}, source_type: "sil"}`。取消事件的 stage 为 `vln_error`，
-其 `result.state=cancelled`；前端应按任务顶层 `stopped` 显示为已取消。
-逐帧进度通过任务查询读取，回调只报告生命周期，避免阻塞轨迹更新。
-
-任务顶层新增 `verification_required`：已停车但目标未验证，可以与真正成功区分。
-控制权或停车状态不明仍为 `requires_attention`，并阻止新任务。
+已停车但目标未验证时，任务终态为 `verification_required`。DSH 请求停止后继续查询，确认任务终态和 `stop_confirmed`。控制权或停车状态不明时，任务终态为 `requires_attention`，runner 等待核对后再接收新任务。
 
 ## 验证与限制
 
@@ -188,7 +174,7 @@ cd /home/yanlinjie/robot_project/rpent
 ```
 
 实际联调需要已经启动的 A*、Go2 和 LightNav，且仿真与现有 RPent 任务均空闲。
-下面的检查会实际控制仿真 Go2，并通过本地接收端验证前端回调：
+以下检查通过任务 MCP 控制仿真 Go2。
 
 ```bash
 RPENT_RUN_UNITREE_VLN=1 ../.venv/bin/python -m pytest \
@@ -197,9 +183,4 @@ RPENT_RUN_UNITREE_VLN=1 ../.venv/bin/python -m pytest \
 
 它复用仓库的本地脚本规划器，只固定高层工具调用；LightNav 推理、Go2 图像、
 航点转换、MPC 和 DDS 均实际运行。覆盖保持当前已知地图位置并停车，以及运动中
-通过 HTTP 取消后释放控制权。产物位于项目 `output/vln-integration/`。
-这证明服务与控制链路接通，不代表视觉语义导航基准成功；外部浏览器页面需按上述
-状态字段接入，测试未覆盖操作者电脑上的页面显示。
-另已使用现有配置的 RPent 模型完成“读取当前位姿 → 调用 VLN 保持该位姿 →
-停车并验收 → finish”的真实调用链。验证汇总位于项目
-`output/vln-integration/verification.json`。
+通过 MCP 取消后释放控制权。产物默认位于项目 `output/vln-integration/policy-chain/`。

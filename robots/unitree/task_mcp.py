@@ -86,7 +86,6 @@ def create_task_mcp(
             "robots": [
                 {
                     "robot_id": robot_id,
-                    "task_reporting": runner.task_reporting,
                     **health,
                 }
             ]

@@ -96,6 +96,20 @@ Relevant ``api`` planner knobs:
 
 For ``--tui`` usage, see :ref:`Terminal interaction <quickstart-interactive>`.
 
+.. _planner-external-mcp:
+
+External MCP servers
+--------------------
+
+Pass ``--mcp-config FILE`` to load a TOML configuration. Each
+``[mcp_servers.<name>]`` entry takes a Streamable HTTP ``url``. RPent
+discovers its tool definitions at task startup, exposes them as
+``mcp__<name>__<tool>``, and closes the connection when the task ends.
+
+- ``enabled`` defaults to true. Use ``enabled_tools`` to select tools for the model.
+- ``startup_timeout_sec`` and ``tool_timeout_sec`` bound discovery and calls. They default to 5 and 10 seconds.
+- ``bearer_token_env_var`` names the environment variable containing the bearer token.
+
 .. _planner-claude-code:
 
 The ``claude_code`` Planner

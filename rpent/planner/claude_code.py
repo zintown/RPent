@@ -56,7 +56,6 @@ from rpent.planner.utils.http_mcp_server import mcp_result
 from rpent.tools import Toolkit, ToolResult
 from rpent.utils.config import get_repo_root
 from rpent.utils.logging import get_logger, init_output_dir
-from rpent.utils.templates import substitute
 
 logger = get_logger("claude")
 
@@ -824,7 +823,7 @@ def _build_rpent_server(sdk: Any, *, toolkit: Toolkit) -> Any:
     for declaration in toolkit.list_tools():
         name = declaration.name
         description = declaration.description
-        input_schema = substitute(declaration.input_schema)
+        input_schema = declaration.model_input_schema
 
         async def run_tool(
             args: dict[str, Any],

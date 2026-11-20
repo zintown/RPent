@@ -24,19 +24,12 @@ from typing import Any
 from uuid import uuid4
 
 from robots.unitree.prompt_bundle import system_prompt, user_prompt
-from robots.unitree.protocol import (
-    DEFAULT_QUERY_TIMEOUT_S,
-    VALIDATION_SCOPE,
-    validate_robot_index,
-)
 from rpent.dashboard.events import DashboardEventSink
 from rpent.memory import MemoryManager
 from rpent.robots.prompt_bundle import PromptBundle
 from rpent.robots.robot_spec import RobotSpec, RunConfig
-from rpent.robots.runtime import try_wait_server
 from rpent.utils.config import get_memory_dir, get_repo_root
 from rpent.utils.daemon import ProcessDaemon
-from rpent.utils.rpc import make_rpc_client
 
 
 def get_robot_spec() -> RobotSpec:
@@ -57,8 +50,19 @@ def get_toolkit(
     dashboard_events: DashboardEventSink,
     config: RunConfig,
 ):
-    """Bind the runtime client to the planner's movement tools."""
-    if config.prompt_vars.get("unitree_mode") == "real":
+    """Build the session toolkit for the selected Unitree mode."""
+    mode = config.prompt_vars["unitree_mode"]
+    if mode == "mcp":
+        from rpent.session import EnvState
+        from rpent.tools import Toolkit
+
+        return Toolkit(
+            dashboard_events=dashboard_events,
+            memory=MemoryManager(config.prompt_vars["memory_dir"]),
+            state=EnvState(config.output_dir),
+            require_finish=True,
+        )
+    if mode == "real":
         from robots.unitree.real_toolkit import RealRobotToolkit
 
         real = runtime_kwargs["real"]
@@ -73,44 +77,21 @@ def get_toolkit(
         except Exception:
             real.close()
             raise
-    if config.prompt_vars.get("unitree_mode", "gateway") == "mujoco":
-        from robots.unitree.mujoco_toolkit import UnitreeMujocoToolkit
+    from robots.unitree.mujoco_toolkit import UnitreeMujocoToolkit
 
-        frontend = None
-        try:
-            if config.prompt_vars.get("frontend_endpoint"):
-                from robots.unitree.frontend_client import FrontendTaskClient
-
-                frontend = FrontendTaskClient(
-                    config.prompt_vars["frontend_endpoint"],
-                    config.prompt_vars["frontend_task_id"],
-                    output_dir=config.output_dir,
-                    subtasks_format=config.prompt_vars["frontend_subtasks_format"],
-                )
-            return UnitreeMujocoToolkit(
-                **runtime_kwargs,
-                dashboard_events=dashboard_events,
-                memory=MemoryManager(config.prompt_vars["memory_dir"]),
-                state_output_dir=config.output_dir,
-                navigation_timeout_s=config.prompt_vars["navigation_timeout_s"],
-                vln_timeout_s=config.prompt_vars.get("vln_timeout_s", 120.0),
-                frontend=frontend,
-            )
-        except Exception:
-            for client in runtime_kwargs.values():
-                client.close()
-            if frontend is not None:
-                frontend.close()
-            raise
-
-    from robots.unitree.toolkit import UnitreeToolkit
-
-    return UnitreeToolkit(
-        **runtime_kwargs,
-        dashboard_events=dashboard_events,
-        memory=MemoryManager(config.prompt_vars["memory_dir"]),
-        state_output_dir=config.output_dir,
-    )
+    try:
+        return UnitreeMujocoToolkit(
+            **runtime_kwargs,
+            dashboard_events=dashboard_events,
+            memory=MemoryManager(config.prompt_vars["memory_dir"]),
+            state_output_dir=config.output_dir,
+            navigation_timeout_s=config.prompt_vars["navigation_timeout_s"],
+            vln_timeout_s=config.prompt_vars.get("vln_timeout_s", 120.0),
+        )
+    except Exception:
+        for client in runtime_kwargs.values():
+            client.close()
+        raise
 
 
 def _add_cli_args(parser: argparse.ArgumentParser, use_dashboard: bool) -> None:
@@ -120,9 +101,9 @@ def _add_cli_args(parser: argparse.ArgumentParser, use_dashboard: bool) -> None:
     )
     parser.add_argument(
         "--unitree-mode",
-        choices=("gateway", "mujoco", "real"),
-        default="gateway",
-        help="Use the legacy gateway, external MuJoCo navigation, or physical Go2 /call service.",
+        choices=("mcp", "mujoco", "real"),
+        default="mcp",
+        help="Select MCP simulation (default), MuJoCo HTTP/VLN, or physical Go2.",
     )
     parser.add_argument(
         "--nav-endpoint",
@@ -163,37 +144,10 @@ def _add_cli_args(parser: argparse.ArgumentParser, use_dashboard: bool) -> None:
         help="Timeout for one LightNav request (default: 3 seconds).",
     )
     parser.add_argument(
-        "--frontend-endpoint",
-        default=None,
-        help="Existing frontend API base URL; enables /api/rpend callbacks in MuJoCo mode.",
-    )
-    parser.add_argument(
-        "--frontend-task-id",
-        default=None,
-        help="Frontend task ID, required together with --frontend-endpoint.",
-    )
-    parser.add_argument(
-        "--frontend-subtasks-format",
-        choices=("object", "array"),
-        default="array",
-        help="Register subtasks as a bare array (default) or {sub_tasks: [...]}.",
-    )
-    parser.add_argument(
-        "--env-endpoint",
-        default="http://127.0.0.1:8115",
-        help="Existing Unitree gateway RPC server (HTTP or socket).",
-    )
-    parser.add_argument(
         "--robot-index",
         type=int,
         default=None,
-        help="Required robot index in real mode. Optional default index in legacy gateway mode.",
-    )
-    parser.add_argument(
-        "--env-timeout-s",
-        type=float,
-        default=None,
-        help="Override command RPC and readiness waits in seconds; by default, command waits use the motion budget plus 30 s and readiness uses 10 s.",
+        help="Required robot index in real mode.",
     )
     parser.add_argument(
         "--real-endpoint",
@@ -213,31 +167,32 @@ def _parse_config(args: argparse.Namespace) -> RunConfig:
     if not task:
         raise ValueError("--task must contain a task description")
     if args.memory_profile != "local":
-        raise ValueError("Unitree gateway runs require --memory-profile local")
-    if args.env_timeout_s is not None and (
-        not math.isfinite(args.env_timeout_s) or args.env_timeout_s <= 0
+        raise ValueError("Unitree runs require --memory-profile local")
+    unitree_mode = args.unitree_mode
+    if unitree_mode == "mcp" and not any(
+        server.enabled and server.enabled_tools != []
+        for server in getattr(args, "mcp_servers", {}).values()
     ):
-        raise ValueError("--env-timeout-s must be finite and greater than zero")
-    if args.robot_index is not None:
-        validate_robot_index(args.robot_index)
-    unitree_mode = getattr(args, "unitree_mode", "gateway")
+        raise ValueError("MCP simulation requires enabled tools in --mcp-config")
     if unitree_mode == "real":
         from robots.unitree.http_client import validate_endpoint
+        from robots.unitree.real_client import validate_robot_index
 
         if not args.real_endpoint or args.robot_index is None:
             raise ValueError("real mode requires --real-endpoint and --robot-index")
+        validate_robot_index(args.robot_index)
         validate_endpoint(args.real_endpoint)
         if args.real_endpoint.rstrip("/").endswith("/call"):
             raise ValueError("--real-endpoint is a base URL; omit /call")
-        if args.env_timeout_s is not None:
-            raise ValueError("real mode uses --real-action-timeout-s for action waits")
         if (
             not math.isfinite(args.real_action_timeout_s)
             or args.real_action_timeout_s <= 0
         ):
             raise ValueError("--real-action-timeout-s must be finite and positive")
-    elif getattr(args, "real_endpoint", None) is not None:
-        raise ValueError("--real-endpoint requires --unitree-mode real")
+    elif args.real_endpoint is not None or args.robot_index is not None:
+        raise ValueError(
+            "--real-endpoint and --robot-index require --unitree-mode real"
+        )
     vln_endpoint = getattr(args, "vln_endpoint", None)
     observation_endpoint = getattr(args, "observation_endpoint", None)
     if (vln_endpoint is None) != (observation_endpoint is None):
@@ -255,31 +210,9 @@ def _parse_config(args: argparse.Namespace) -> RunConfig:
         for value in (args.vln_timeout_s, args.vln_inference_timeout_s):
             if not math.isfinite(value) or value <= 0:
                 raise ValueError("VLN budgets must be finite and positive")
-    frontend_endpoint = getattr(args, "frontend_endpoint", None)
-    frontend_task_id = getattr(args, "frontend_task_id", None)
-    if (frontend_endpoint is None) != (frontend_task_id is None):
-        raise ValueError(
-            "--frontend-endpoint and --frontend-task-id must be provided together"
-        )
-    if frontend_endpoint is not None:
-        from robots.unitree.frontend_client import validate_task_id
-        from robots.unitree.http_client import validate_endpoint
-
-        if unitree_mode != "mujoco":
-            raise ValueError("frontend callbacks require --unitree-mode mujoco")
-        if getattr(args, "explore", False):
-            raise ValueError(
-                "frontend callbacks support one evaluation run; remove --explore"
-            )
-        validate_endpoint(frontend_endpoint)
-        validate_task_id(frontend_task_id)
     if unitree_mode == "mujoco":
         from robots.unitree.http_client import validate_endpoint
 
-        if args.robot_index is not None or args.env_timeout_s is not None:
-            raise ValueError(
-                "--robot-index and --env-timeout-s apply to gateway mode only"
-            )
         validate_endpoint(args.nav_endpoint)
         validate_endpoint(args.sim_endpoint)
         if (
@@ -297,10 +230,9 @@ def _parse_config(args: argparse.Namespace) -> RunConfig:
         else get_memory_dir("unitree")
     )
     mode_vars = {"unitree_mode": unitree_mode}
-    env_endpoint = args.env_endpoint
     if unitree_mode == "real":
-        env_endpoint = args.real_endpoint
         mode_vars.update(
+            env_endpoint=args.real_endpoint,
             real_endpoint=args.real_endpoint,
             real_action_timeout_s=args.real_action_timeout_s,
         )
@@ -317,30 +249,22 @@ def _parse_config(args: argparse.Namespace) -> RunConfig:
                 vln_timeout_s=args.vln_timeout_s,
                 vln_inference_timeout_s=args.vln_inference_timeout_s,
             )
-        if frontend_endpoint is not None:
-            mode_vars.update(
-                frontend_endpoint=frontend_endpoint,
-                frontend_task_id=frontend_task_id,
-                frontend_subtasks_format=args.frontend_subtasks_format,
-            )
     return RunConfig(
         recipe_tag=f"unitree_{uuid4().hex[:12]}",
         output_dir=output_dir,
         prompt_vars={
             "task": task,
-            "env_endpoint": env_endpoint,
             "robot_index": args.robot_index,
             "memory_dir": str(memory_dir),
             **mode_vars,
         },
         task_desc={
             "task": task,
-            "env_endpoint": env_endpoint,
             "robot_index": args.robot_index,
             "validation_scope": {
                 "mujoco": "mujoco_navigation",
+                "mcp": "mujoco_mcp_navigation",
                 "real": "real_relative_actions",
-                "gateway": VALIDATION_SCOPE,
             }[unitree_mode],
             **mode_vars,
         },
@@ -353,67 +277,30 @@ def _init_runtime(
     dashboard_events: DashboardEventSink,
     components: set[str] | None,
 ) -> tuple[list[ProcessDaemon], dict[str, Any]]:
-    if getattr(args, "unitree_mode", "gateway") == "mujoco":
-        return _init_mujoco_runtime(args, components)
-    if getattr(args, "unitree_mode", "gateway") == "real":
-        from robots.unitree.real_client import RealRobotClient
-
-        if components is not None:
-            if components.difference({"real"}):
-                raise ValueError(
-                    f"unknown real runtime components: {sorted(components)}"
-                )
-            if not components:
-                return [], {}
-        real = RealRobotClient(args.real_endpoint, robot_index=args.robot_index)
-        try:
-            real.list_robots()
-        except Exception:
-            real.close()
-            raise
-        return [], {"real": real}
-    from robots.unitree.env_client import UnitreeEnvClient
-
-    selected = {"env"} if components is None else components
-    if selected.difference({"env"}):
-        raise ValueError(f"unknown Unitree runtime components: {sorted(selected)}")
-    if not selected:
+    if args.unitree_mode == "mcp":
         return [], {}
-    rpc = make_rpc_client(args.env_endpoint)
-    env = UnitreeEnvClient(
-        rpc, timeout_s=args.env_timeout_s, robot_index=args.robot_index
-    )
+    if args.unitree_mode == "mujoco":
+        return _init_mujoco_runtime(args, components)
+    from robots.unitree.real_client import RealRobotClient
 
-    def check_robots() -> None:
-        env.list_robots()
-        if args.robot_index is not None:
-            status = env.get_robot_status()
-            if status["status"] != "online":
-                raise RuntimeError(f"robot {args.robot_index} is offline")
-
+    if components is not None:
+        if components.difference({"real"}):
+            raise ValueError(f"unknown real runtime components: {sorted(components)}")
+        if not components:
+            return [], {}
+    real = RealRobotClient(args.real_endpoint, robot_index=args.robot_index)
     try:
-        try_wait_server(
-            {},
-            dashboard_events,
-            "env",
-            rpc,
-            None,
-            args.env_timeout_s
-            if args.env_timeout_s is not None
-            else DEFAULT_QUERY_TIMEOUT_S,
-            probe_method="env.list_robots",
-            post_fn=check_robots,
-        )
+        real.list_robots()
     except Exception:
-        rpc.close()
+        real.close()
         raise
-    return [], {"env": env}
+    return [], {"real": real}
 
 
 def _init_mujoco_runtime(
     args: argparse.Namespace, components: set[str] | None
 ) -> tuple[list[ProcessDaemon], dict[str, Any]]:
-    """Borrow the external REST services, cleaning partial startup on failure."""
+    """Connect external simulation and navigation services with owned clients."""
     from robots.unitree.http_client import map_identity
     from robots.unitree.navigation_client import NavigationClient
     from robots.unitree.simulation_client import SimulationClient

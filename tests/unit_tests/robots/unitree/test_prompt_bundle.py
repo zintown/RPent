@@ -20,18 +20,14 @@ from robots.unitree.robot_spec import get_robot_spec
 
 
 @pytest.mark.parametrize("visual", [False, True])
-@pytest.mark.parametrize("frontend", [False, True])
-def test_prompt_exposes_only_configured_navigation_tools(visual, frontend):
+def test_prompt_exposes_only_configured_navigation_tools(visual):
     variables = {"unitree_mode": "mujoco"}
     if visual:
         variables["vln_endpoint"] = "ws://vln.test"
-    if frontend:
-        variables["frontend_endpoint"] = "http://frontend.test"
     prompt = get_robot_spec().prompts.render("system", variables=variables)
     assert "plan_navigation" in prompt and "follow_navigation" in prompt
     for name in ("run_vln_navigation", "get_vln_status", "stop_vln_navigation"):
         assert (name in prompt) is visual
-    assert ("register_navigation_subtasks" in prompt) is frontend
     assert "dis_move" not in prompt
     assert "Every task must end with the finish tool" in prompt
 

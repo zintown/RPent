@@ -29,7 +29,7 @@ bash run_rpent.sh "real-status-$(date -u +%Y%m%dT%H%M%SZ)" \
 
 输出在 `output/real-integration/runs/`。只读查询的 `online` 表示连通且心跳有效。给出相对移动任务前，由操作者确认目标本体、控制器就绪和运动区域。一次只由一个任务进程控制该本体。
 
-## 通过 HTTP 或 DSH 调度
+## 通过 MCP 调度
 
 在已加载上述配置的终端启动真机 runner。示例使用 `8781`，与本机使用 `8780` 的仿真 runner 分开。模型和 `RPENT_RUNNER_TOKEN` 从现有私有配置加载。
 
@@ -37,18 +37,12 @@ bash run_rpent.sh "real-status-$(date -u +%Y%m%dT%H%M%SZ)" \
 ../.venv/bin/python -m robots.unitree.task_server \
   --host 127.0.0.1 --port 8781 \
   --jobs-dir output/real-integration/jobs \
-  --mcp --robot-id go2-real --task-reporting local
+  --robot-id go2-real
 ```
 
-可以在另一终端调用现有 [`/api/rpend/run` 接口](FRONTEND_USAGE.zh-CN.md)，将 runner 地址改为 `http://127.0.0.1:8781`，直接使用调度端生成的任务 ID。`local` 模式将结果存到 RPent，无需先向网页后端创建任务。DSH 使用相同的 MCP 工具，在启动时指定真机 runner 的地址。
+跨服务器访问时按[任务 MCP 服务](TASK_MCP.zh-CN.md)配置 RPent 的监听地址、可信 Host 和令牌。DSH 使用真机 runner 的 `/mcp/` 地址，以 `go2-real` 为机器人编号提交任务并查询结果。
 
-```bash
-RPENT_MCP_URL=http://127.0.0.1:8781/mcp/ \
-  bash robots/unitree/run_dsh.sh headless \
-  '让 go2-real 只查询在线和相机状态。等待任务结果并报告。'
-```
-
-前台 runner 用 Ctrl+C 关闭。运行中可用任务停止接口请求取消，继续查询任务终态。任务目录及输出目录各自独立，仿真 runner 的启动方式见 [DSH 仿真指南](DSH_USAGE.zh-CN.md)。
+前台 runner 用 Ctrl+C 关闭。运行中可用任务停止接口请求取消，继续查询任务终态。
 
 ## 真机工具与执行结果
 
@@ -65,6 +59,6 @@ RPENT_MCP_URL=http://127.0.0.1:8781/mcp/ \
 
 移动须收到真实完成和停车证据。`queued`、`dry_run`、`unknown` 和仅收到停止回执都不能证明到达或物理停稳。查询进度时使用响应内的 `result.request_id`。RPent 为每次提交建立关联值和幂等键，超时或丢失回执时保留待核对状态。取消正在等待的移动时，RPent 请求停车并继续查原运动反馈。
 
-`states.json` 记录工具结果，`real/latest.json` 记录真机请求和停车状态。HTTP/MCP 状态中的 `navigation.real_robot` 来自后者。任务返回 `requires_attention` 时，先核对原请求与现场运动状态，再恢复任务调度。
+`states.json` 记录工具结果，`real/latest.json` 记录真机请求和停车状态。MCP 任务结果中的 `navigation.real_robot` 来自后者。任务返回 `requires_attention` 时，先核对原请求与现场运动状态，再恢复任务调度。
 
 `RPENT_REAL_ACTION_TIMEOUT_S` 默认每次移动或抓拍等待 180 秒。`RPENT_PLANNER_TIMEOUT_S` 仍控制整个模型任务的预算。

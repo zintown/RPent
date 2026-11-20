@@ -23,14 +23,14 @@ from robots.unitree.task_server import create_app
 TOKEN = "offline-test-token"
 URL = "http://127.0.0.1:8780"
 CHILD = """
-import json, os, signal, sys, time
+import json, signal, sys, time
 from pathlib import Path
 root = Path.cwd()
 output = root / 'outputs' / sys.argv[1]
 output.mkdir(parents=True)
 print('RPent output: ' + str(output), flush=True)
 with (root / 'launches.jsonl').open('a') as f:
-    f.write(json.dumps({'id': sys.argv[1], 'reporting': os.environ['RPENT_TASK_REPORTING']}) + '\\n')
+    f.write(json.dumps({'id': sys.argv[1]}) + '\\n')
 (output / 'states.json').write_text(json.dumps({'steps': [{'state': {}}]}))
 if sys.argv[2] == 'wait':
     signal.signal(signal.SIGINT, lambda *_: sys.exit(130))
@@ -56,9 +56,7 @@ def make_app(root: Path, **kwargs):
         repo_root=root,
         jobs_dir=root / "jobs",
         token=TOKEN,
-        enable_mcp=True,
         robot_id="go2-test",
-        task_reporting="local",
         **kwargs,
     )
 
@@ -87,7 +85,7 @@ async def call(session, name, **args):
     return result.structuredContent
 
 
-def test_http_and_mcp_share_one_idempotent_task_owner(root):
+def test_mcp_is_the_only_task_entry_point_and_reuses_task_ids(root):
     async def run():
         async with connect(make_app(root)) as (session, http):
             tools = {tool.name for tool in (await session.list_tools()).tools}
@@ -100,7 +98,9 @@ def test_http_and_mcp_share_one_idempotent_task_owner(root):
                 "stop_robot_task",
             }
             robots = await call(session, "list_robots")
-            assert robots["robots"][0]["task_reporting"] == "local"
+            assert robots["robots"][0]["robot_id"] == "go2-test"
+            assert not robots["robots"][0]["busy"]
+            assert (await http.get("/healthz")).json()["ok"]
             args = {"robot_id": "go2-test", "task_id": "task-1", "task_name": "success"}
             started = await call(session, "submit_robot_task", **args)
             assert started["created"]
@@ -113,12 +113,18 @@ def test_http_and_mcp_share_one_idempotent_task_owner(root):
             )
             assert finished["terminal"]
             assert finished["task"]["status"] == "succeeded"
-            assert (await http.get("/api/rpend/run/task-1")).json() == finished["task"]
+            identity = {"robot_id": "go2-test", "task_id": "task-1"}
+            assert await call(session, "get_robot_task", **identity) == finished["task"]
+            logs = await call(session, "get_robot_logs", **identity, tail_bytes=8)
+            assert 0 < len(logs["text"]) <= 8
             assert not (await call(session, "submit_robot_task", **args))["created"]
-            response = await http.post(
-                "/api/rpend/run", json={"task_id": "task-1", "task_name": "success"}
-            )
-            assert response.status_code == 200
+            for method, path in (
+                ("POST", "/api/rpend/run"),
+                ("GET", "/api/rpend/run/task-1"),
+                ("GET", "/api/rpend/run/task-1/logs"),
+                ("POST", "/api/rpend/run/task-1/stop"),
+            ):
+                assert (await http.request(method, path)).status_code == 404
             changed = await session.call_tool(
                 "submit_robot_task", args | {"task_name": "different"}
             )
@@ -127,7 +133,7 @@ def test_http_and_mcp_share_one_idempotent_task_owner(root):
             json.loads(line)
             for line in (root / "launches.jsonl").read_text().splitlines()
         ]
-        assert launches == [{"id": "task-1", "reporting": "local"}]
+        assert launches == [{"id": "task-1"}]
 
     asyncio.run(run())
 
@@ -249,7 +255,7 @@ def test_wrong_robot_and_invalid_arguments_never_launch(root):
     asyncio.run(run())
 
 
-def test_mcp_and_http_require_token_and_reject_untrusted_host(root):
+def test_mcp_requires_token_and_rejects_untrusted_host(root):
     async def run():
         app = make_app(root, mcp_allowed_hosts=["go2.internal:8780"])
         async with app.router.lifespan_context(app):
@@ -257,7 +263,6 @@ def test_mcp_and_http_require_token_and_reject_untrusted_host(root):
                 transport=httpx.ASGITransport(app=app), base_url=URL
             ) as http:
                 assert (await http.post("/mcp/", json={})).status_code == 401
-                assert (await http.get("/api/rpend/run/task")).status_code == 401
                 body = {
                     "jsonrpc": "2.0",
                     "id": 1,

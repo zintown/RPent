@@ -29,7 +29,6 @@ import httpx
 import pytest
 from websockets.sync.server import serve
 
-from robots.unitree.frontend_client import FrontendTaskClient
 from robots.unitree.http_client import ServiceError
 from robots.unitree.mujoco_toolkit import UnitreeMujocoToolkit
 from robots.unitree.observation_client import ObservationClient
@@ -435,96 +434,29 @@ def test_toolkit_exposes_vln_and_cannot_finish_unverified_success(
         toolkit.close()
 
 
-def test_frontend_vln_callback_correlates_the_registered_subtask(
-    tmp_path, navigation_services
-):
-    requests = []
-
-    def handler(request):
-        data = json.loads(request.content)
-        requests.append((request.url.path, data))
-        return httpx.Response(
-            200,
-            json={"items": [{"id": "sub-1"}]}
-            if request.url.path == "/api/rpend/task-1"
-            else {"ok": True},
+def test_toolkit_can_finish_after_vln_verifies_arrival(tmp_path, navigation_services):
+    toolkit = UnitreeMujocoToolkit(
+        nav=navigation_services.nav,
+        sim=FakeSimulation(),
+        vln=FakeModel(),
+        observation=FakeObservation(),
+        dashboard_events=NullDashboardEventSink(),
+        memory=MemoryManager(tmp_path / "memory"),
+        state_output_dir=tmp_path / "run",
+    )
+    try:
+        result = toolkit.execute_tool(
+            "run_vln_navigation",
+            {"instruction": "stop here", "expected_goal": {"x": 0.0, "y": 0.0}},
         )
-
-    with httpx.Client(transport=httpx.MockTransport(handler)) as http:
-        frontend = FrontendTaskClient(
-            "http://frontend.test", "task-1", output_dir=tmp_path, client=http
-        )
-        toolkit = UnitreeMujocoToolkit(
-            nav=navigation_services.nav,
-            sim=FakeSimulation(),
-            vln=FakeModel(),
-            observation=FakeObservation(),
-            frontend=frontend,
-            dashboard_events=NullDashboardEventSink(),
-            memory=MemoryManager(tmp_path / "memory"),
-            state_output_dir=tmp_path / "run",
-        )
-        try:
-            toolkit.execute_tool(
-                "register_navigation_subtasks", {"commands": ["hold this map position"]}
-            )
-            result = toolkit.execute_tool(
-                "run_vln_navigation",
-                {
-                    "instruction": "stop here",
-                    "expected_goal": {"x": 0.0, "y": 0.0},
-                    "sub_task_id": "sub-1",
-                },
-            )
-            assert not result.is_error, result.data
-            assert result.data["goal_verified"]
-            assert [r[1]["data"]["stage"] for r in requests[1:]] == [
-                "vln_started",
-                "vln_finished",
-            ]
-            assert requests[-1][1]["data"]["navigation_completed"]
-            assert not toolkit.execute_tool(
-                "finish", {"status": "success", "summary": "verified"}
-            ).is_error
-        finally:
-            toolkit.close()
-
-
-def test_frontend_start_callback_failure_releases_the_owned_lease(
-    tmp_path, navigation_services
-):
-    def handler(request):
-        if request.url.path == "/api/rpend/task-1":
-            return httpx.Response(200, json={"items": [{"id": "sub-1"}]})
-        return httpx.Response(503, json={"error": "callback unavailable"})
-
-    sim = FakeSimulation()
-    with httpx.Client(transport=httpx.MockTransport(handler)) as http:
-        frontend = FrontendTaskClient(
-            "http://frontend.test", "task-1", output_dir=tmp_path, client=http
-        )
-        toolkit = UnitreeMujocoToolkit(
-            nav=navigation_services.nav,
-            sim=sim,
-            vln=FakeModel(),
-            observation=FakeObservation(),
-            frontend=frontend,
-            dashboard_events=NullDashboardEventSink(),
-            memory=MemoryManager(tmp_path / "memory"),
-            state_output_dir=tmp_path / "run",
-        )
-        try:
-            toolkit.execute_tool(
-                "register_navigation_subtasks", {"commands": ["VLN test"]}
-            )
-            result = toolkit.execute_tool(
-                "run_vln_navigation", {"instruction": "go", "sub_task_id": "sub-1"}
-            )
-            assert result.is_error and "callback unavailable" in result.data["error"]
-            assert sim.control_id is None and sim.stops == ["control_owned"]
-            assert not sim.requests
-        finally:
-            toolkit.close()
+        assert not result.is_error, result.data
+        assert result.data["goal_verified"] and result.data["stop_confirmed"]
+        assert toolkit.state.get().state["completed_navigation_goals"] == 1
+        assert not toolkit.execute_tool(
+            "finish", {"status": "success", "summary": "verified"}
+        ).is_error
+    finally:
+        toolkit.close()
 
 
 def test_cli_vln_configuration_registers_optional_tools_without_gpu_imports(tmp_path):

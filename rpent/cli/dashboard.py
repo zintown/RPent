@@ -313,6 +313,8 @@ def _run_dashboard_task(
                 state.bind_toolkit(toolkit)
                 memory_manager = toolkit.memory
                 try:
+                    if getattr(task_args, "mcp_servers", None):
+                        toolkit.add_mcp_tools(task_args.mcp_servers)
                     planner = build_planner(
                         task_args.planner,
                         output_dir=output_dir,

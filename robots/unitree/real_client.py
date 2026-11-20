@@ -14,8 +14,8 @@ from typing import Any
 import httpx
 
 from robots.unitree.http_client import ServiceError, finite_number, validate_endpoint
-from robots.unitree.protocol import MAX_DISTANCE_M, validate_robot_index
 
+_MAX_DISTANCE_M = 5.0
 _REQUEST_STATUSES = ("queued", "completed", "dry_run", "failed", "rejected", "unknown")
 _OPERATIONS = ("move_relative", "capture_image", "stop")
 
@@ -28,6 +28,12 @@ class RobotRequestRejected(ServiceError):
         self.request_id = request_id
 
 
+def validate_robot_index(robot_index: int) -> None:
+    """Require a positive integer robot identifier."""
+    if type(robot_index) is not int or robot_index <= 0:
+        raise ValueError("robot_index must be a positive integer")
+
+
 def relative_command(
     dx_m: float, dy_m: float, arrival_turn_deg: float
 ) -> dict[str, Any]:
@@ -37,7 +43,7 @@ def relative_command(
         "dy_m": finite_number(dy_m, "dy_m"),
         "arrival_turn_deg": finite_number(arrival_turn_deg, "arrival_turn_deg"),
     }
-    if math.hypot(payload["dx_m"], payload["dy_m"]) > MAX_DISTANCE_M:
+    if math.hypot(payload["dx_m"], payload["dy_m"]) > _MAX_DISTANCE_M:
         raise ValueError("relative displacement must not exceed 5 m in total")
     return {"type": "move_relative", "payload": payload}
 

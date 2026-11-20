@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Serve persistent MuJoCo task execution over HTTP and optional MCP."""
+"""Serve persistent Unitree tasks through Streamable HTTP MCP."""
 
 from __future__ import annotations
 
@@ -34,13 +34,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from starlette.datastructures import Headers
 
-from robots.unitree.frontend_client import validate_task_id
 from rpent.evaluation import write_json_atomic
 from rpent.utils.config import get_repo_root
 from rpent.utils.logging import get_logger
@@ -61,8 +60,21 @@ def _read_json(path: Path) -> dict[str, Any]:
     return value
 
 
+def validate_task_id(value: str) -> str:
+    """Check the stable identifier shared by the runner and its launcher."""
+    if (
+        not isinstance(value, str)
+        or not value
+        or value in {".", ".."}
+        or any(char.isspace() or ord(char) < 32 for char in value)
+        or any(char in value for char in ("/", "\\", "\x7f"))
+    ):
+        raise ValueError("task identifiers must be nonempty single path segments")
+    return value
+
+
 class RunRequest(BaseModel):
-    """Accept a stable task ID and complete instruction for the configured reporter."""
+    """Accept a stable task ID and a complete instruction."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
     task_id: str = Field(min_length=1, max_length=256)
@@ -109,11 +121,7 @@ class TaskRunner:
         jobs_dir: Path,
         *,
         stop_timeout_s: float = 30.0,
-        task_reporting: str = "frontend",
     ) -> None:
-        if task_reporting not in {"frontend", "local"}:
-            raise ValueError("task_reporting must be frontend or local")
-        self.task_reporting = task_reporting
         self.repo_root = repo_root.resolve()
         self.jobs_dir = jobs_dir.resolve()
         self.jobs_dir.mkdir(parents=True, exist_ok=True)
@@ -225,13 +233,10 @@ class TaskRunner:
     def _snapshot(self, job: _Job) -> dict[str, Any]:
         if job.record["status"] in ACTIVE_STATUSES:
             self._refresh(job)
-        result = copy.deepcopy(job.record)
-        base = "/api/rpend/run/" + quote(result["task_id"], safe="")
-        result.update(status_url=base, logs_url=base + "/logs", stop_url=base + "/stop")
-        return result
+        return copy.deepcopy(job.record)
 
     def start(self, request: RunRequest) -> tuple[dict[str, Any], bool]:
-        """Start once per parent ID; return the record and whether it is new."""
+        """Start once per task ID; return the record and whether it is new."""
         with self._lock:
             if self._closed:
                 raise TaskConflict("service is shutting down")
@@ -258,7 +263,6 @@ class TaskRunner:
             job = _Job(
                 record={
                     **request.model_dump(),
-                    "task_reporting": self.task_reporting,
                     "status": "starting",
                     "created_at": _now(),
                     "finished_at": None,
@@ -280,11 +284,7 @@ class TaskRunner:
             slave = None
             try:
                 job.terminal_fd, slave = pty.openpty()
-                environment = dict(
-                    os.environ,
-                    PYTHONUNBUFFERED="1",
-                    RPENT_TASK_REPORTING=self.task_reporting,
-                )
+                environment = dict(os.environ, PYTHONUNBUFFERED="1")
                 with log_file.open("ab", buffering=0) as output:
                     job.process = subprocess.Popen(
                         [
@@ -502,115 +502,55 @@ def create_app(
     repo_root: Path | None = None,
     jobs_dir: Path | None = None,
     token: str | None = None,
-    enable_mcp: bool = False,
     robot_id: str = "go2-01",
-    task_reporting: str = "frontend",
     mcp_allowed_hosts: list[str] | None = None,
 ) -> FastAPI:
-    """Build the standalone API; allocate resources only during its lifespan."""
+    """Build the MCP task service; own its runner and session manager in the lifespan."""
+    from robots.unitree.task_mcp import create_task_mcp
+
     root = repo_root or get_repo_root()
-    mcp_server = None
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        runner = TaskRunner(
-            root,
-            jobs_dir or root / "logs" / "http-runner",
-            task_reporting=task_reporting,
-        )
+        runner = TaskRunner(root, jobs_dir or root / "logs" / "http-runner")
         app.state.runner = runner
         try:
-            if mcp_server is None:
+            async with mcp_server.session_manager.run():
                 yield
-            else:
-                async with mcp_server.session_manager.run():
-                    yield
         finally:
             await asyncio.to_thread(runner.close)
 
-    async def authorize(authorization: str | None = Header(default=None)) -> None:
-        if token is not None:
-            scheme, _, supplied = (authorization or "").partition(" ")
+    app = FastAPI(
+        title="RPent Unitree task runner",
+        lifespan=lifespan,
+        openapi_url=None,
+    )
+    mcp_server = create_task_mcp(
+        lambda: app.state.runner, robot_id=robot_id, allowed_hosts=mcp_allowed_hosts
+    )
+    mcp_app = mcp_server.streamable_http_app()
+
+    @app.get("/healthz")
+    async def health() -> dict[str, Any]:
+        return app.state.runner.health()
+
+    async def authorized_mcp(scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope["type"] == "http" and token is not None:
+            authorization = Headers(scope=scope).get("authorization", "")
+            scheme, _, supplied = authorization.partition(" ")
             if scheme.lower() != "bearer" or not secrets.compare_digest(
                 supplied.encode(), token.encode()
             ):
-                raise HTTPException(
-                    401,
-                    "valid Bearer token required",
+                response = JSONResponse(
+                    {"detail": "valid Bearer token required"},
+                    status_code=401,
                     headers={"WWW-Authenticate": "Bearer"},
                 )
+                await response(scope, receive, send)
+                return
+        await mcp_app(scope, receive, send)
 
-    app = FastAPI(title="RPent Unitree task runner", lifespan=lifespan)
-
-    @app.get("/healthz")
-    async def health():
-        return app.state.runner.health()
-
-    def find(task_id: str) -> dict[str, Any]:
-        try:
-            return app.state.runner.get(task_id)
-        except KeyError:
-            raise HTTPException(404, "task_id is not known to this runner") from None
-
-    dependencies = [Depends(authorize)]
-
-    @app.post("/api/rpend/run", dependencies=dependencies)
-    async def start(request: RunRequest):
-        try:
-            record, created = app.state.runner.start(request)
-        except TaskConflict as exc:
-            raise HTTPException(409, str(exc)) from exc
-        except OSError as exc:
-            logger.exception("Cannot start task %s", request.task_id)
-            raise HTTPException(
-                503, "launcher could not start; check runner logs"
-            ) from exc
-        return JSONResponse(record, status_code=202 if created else 200)
-
-    @app.get("/api/rpend/run/{task_id}", dependencies=dependencies)
-    async def status(task_id: str):
-        return find(task_id)
-
-    @app.get("/api/rpend/run/{task_id}/logs", dependencies=dependencies)
-    async def logs(
-        task_id: str, tail_bytes: int = Query(default=16384, ge=1, le=65536)
-    ):
-        find(task_id)
-        return {"task_id": task_id, "text": app.state.runner.logs(task_id, tail_bytes)}
-
-    @app.post("/api/rpend/run/{task_id}/stop", dependencies=dependencies)
-    async def stop(task_id: str):
-        find(task_id)
-        return app.state.runner.stop(task_id)
-
-    if enable_mcp:
-        from robots.unitree.task_mcp import create_task_mcp
-
-        mcp_server = create_task_mcp(
-            lambda: app.state.runner, robot_id=robot_id, allowed_hosts=mcp_allowed_hosts
-        )
-        mcp_app = mcp_server.streamable_http_app()
-
-        async def authorized_mcp(
-            scope: dict[str, Any], receive: Any, send: Any
-        ) -> None:
-            if scope["type"] == "http":
-                from starlette.datastructures import Headers
-
-                try:
-                    await authorize(Headers(scope=scope).get("authorization"))
-                except HTTPException as exc:
-                    response = JSONResponse(
-                        {"detail": exc.detail},
-                        status_code=exc.status_code,
-                        headers=exc.headers,
-                    )
-                    await response(scope, receive, send)
-                    return
-            await mcp_app(scope, receive, send)
-
-        app.mount("/mcp", authorized_mcp)
-
+    app.mount("/mcp", authorized_mcp)
     return app
 
 
@@ -619,15 +559,11 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", default=8780, type=int)
-    parser.add_argument("--mcp", action="store_true", help="Serve task tools at /mcp/.")
     parser.add_argument("--robot-id", default="go2-01")
     parser.add_argument(
         "--mcp-allowed-host",
         action="append",
         help="Additional trusted Host header, e.g. go2-01.lan:8780; repeatable.",
-    )
-    parser.add_argument(
-        "--task-reporting", choices=("frontend", "local"), default="frontend"
     )
     parser.add_argument(
         "--jobs-dir", type=Path, help="default: <repo>/logs/http-runner"
@@ -642,9 +578,7 @@ def main(argv: list[str] | None = None) -> None:
         create_app(
             jobs_dir=args.jobs_dir,
             token=token,
-            enable_mcp=args.mcp,
             robot_id=args.robot_id,
-            task_reporting=args.task_reporting,
             mcp_allowed_hosts=args.mcp_allowed_host,
         ),
         host=args.host,

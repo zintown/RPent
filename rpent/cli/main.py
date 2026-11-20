@@ -158,6 +158,11 @@ def _build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--max-turns", type=int, default=100)
     ap.add_argument("--max-tokens", type=int, default=8192)
     ap.add_argument(
+        "--mcp-config",
+        type=Path,
+        help="TOML file with external MCP servers under [mcp_servers].",
+    )
+    ap.add_argument(
         "--reasoning-effort",
         choices=REASONING_EFFORTS,
         default="none",
@@ -450,13 +455,18 @@ def main() -> int:
     from rpent.memory.loading import prepare_run_memory
 
     try:
+        args.mcp_servers = {}
+        if args.mcp_config is not None:
+            from rpent.tools.mcp_client import load_mcp_servers
+
+            args.mcp_servers = load_mcp_servers(args.mcp_config)
         if args.memory_repo is not None:
             from rpent.memory.source import parse_repo
 
             parse_repo(args.memory_repo)
         if robot_spec.validate_args is not None:
             robot_spec.validate_args(args)
-    except ValueError as exc:
+    except (OSError, ValueError) as exc:
         parser.error(str(exc))
     if args.dashboard:
         from rpent.cli.dashboard import run_dashboard_session
@@ -637,6 +647,8 @@ def main() -> int:
 
                 operator_input.bind_verdict(accept_verdict)
             try:
+                if args.mcp_servers:
+                    toolkit.add_mcp_tools(args.mcp_servers)
                 result = planner.solve(
                     system_prompt=system_prompt,
                     user_message=session_msg,

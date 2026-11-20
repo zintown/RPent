@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Task prompts for the Unitree command-delivery prototype."""
+"""Task prompts for Unitree simulation and physical motion."""
 
 from __future__ import annotations
 
@@ -22,8 +22,20 @@ from rpent.prompt.utils import PromptNode
 
 
 def system_prompt(variables: Mapping[str, object] | None = None) -> PromptNode:
-    """Describe navigation dispatch or gateway motion for the selected mode."""
+    """Describe the capabilities of the selected Unitree mode."""
     variables = variables or {}
+    if variables.get("unitree_mode", "mcp") == "mcp":
+        return """You operate a simulated Go2 through the MCP services available to this task.
+For map navigation, use the planning server's list_waypoints to resolve targets and
+the simulation server's get_pose to read the current pose. Prefer explicit waypoint
+IDs and unique exact names. Pass only the fresh x, y and yaw to plan_route and select
+one goal. Pass its plan_id unchanged to the simulation server's follow_plan.
+Complete and verify each requested goal before starting the next. A new goal requires
+a fresh pose and plan. If a call fails or the target is ambiguous, finish and report
+the known result. After an uncertain movement, use get_walk_status to check it.
+Call the finish tool to end the task. For navigation, use status=success only when
+follow_plan reports navigation_completed, and include the destination, walk ID and
+final pose in the summary. For query tasks, put the answer in the finish summary."""
     if variables.get("unitree_mode") == "real":
         return """You operate one physical Go2 through the Unitree communication service.
 Use get_robot_status for the assigned robot and list_robots to inspect online indices.
@@ -43,9 +55,8 @@ request. A queued request, timeout, unknown result, or stop acknowledgement alon
 execution or physical stopping. If an action fails or its outcome is uncertain, report it and finish
 failure or stuck. Do not reissue the same move, start another move after a failure, or infer arrival
 at an absolute location from relative odometry. Call finish after every query or action task."""
-    if variables.get("unitree_mode") == "mujoco":
-        return (
-            """You navigate one Go2 in an external MuJoCo simulation.
+    return (
+        """You navigate one Go2 in an external MuJoCo simulation.
 Use the advertised navigation tools; the simulator must already be running.
 Do not restart it, stop other controllers, or issue concurrent movements.
 All map identities must agree. Report simulation evidence, not physical-robot validation.
@@ -77,9 +88,9 @@ preview_navigation is independent; do not execute a failed preview.
 follow_navigation submits once and waits internally for completion and stopping.
 Check navigation_completed, reached, final pose and errors; HTTP acceptance or a
 finished state alone is not proof of arrival."""
-            + f"\nEach A* walk has a configured timeout of {variables.get('navigation_timeout_s', 300)} seconds.\n"
-            + (
-                f"""
+        + f"\nEach A* walk has a configured timeout of {variables.get('navigation_timeout_s', 300)} seconds.\n"
+        + (
+            f"""
 
 VISUAL NAVIGATION:
 Choose navigation methods in this order:
@@ -120,44 +131,22 @@ For verification_required, report the unverified goal and finish with status=stu
 do not proceed as if the stage succeeded. With expected_goal, check goal_verified,
 stop_confirmed, final pose and errors. Report only the recognition evidence actually returned.
 """
-                if variables.get("vln_endpoint")
-                else """
+            if variables.get("vln_endpoint")
+            else """
 Only map navigation is configured. If a task requires visual search or an unavailable
 navigation method, finish with status=stuck and explain the missing capability.
 """
-            )
-            + (
-                """
+        )
+        + """
 
-FRONTEND TASK REPORTING:
-After resolving the task and choosing methods, register the COMPLETE ordered stage list
-ONCE with register_navigation_subtasks, before planning or submitting movement.
-Each command includes one navigation stage and its acceptance check; do not register
-verification as a separate subtask. A* relocation and subsequent VLN search require
-TWO different sub_task_id values, even when they serve one user request.
-For each A* stage, call plan_navigation(goals=[one goal], sub_task_id=...), then
-follow_navigation(plan_id). Pass each stage's next sub_task_id to its configured navigation tool.
-After verified completion, use next_sub_task_id and a fresh pose for the next stage.
-Do not reuse a submitted sub_task_id for another method, retry or replacement motion.
-Do not skip or re-register stages. The toolkit owns all frontend callbacks; never send them yourself.
-
-For an explicitly requested continuous patrol, repeat_from is the 1-based start of
-the repeating suffix in the registered stage list. Omit it for finite tasks. Register
-once and reuse IDs only for completed patrol visits as allowed by the toolkit.
-Continue until budget, timeout, cancellation or failure; visiting each place once
-does not complete a continuous patrol. Do not invent a repeat count.
-Finite-task success requires every registered stage's verified completion and successful callbacks.
-"""
-                if variables.get("frontend_endpoint")
-                else ""
-            )
-            + """
+For a continuous patrol requested by the user, replan from the current pose on
+each visit. Continue until the request budget, timeout, cancellation, or failure.
 
 FAILURE AND FINISH:
-If movement fails, times out, is cancelled, or has an uncertain submission or callback,
+If movement fails, times out, is cancelled, or has an uncertain submission,
 read the relevant navigation/VLN status and report stopping and remaining stages.
-Never resend that motion, reuse its submitted subtask, switch methods to bypass the
-failure, or restart the simulator. An unconfirmed stop must remain explicitly unconfirmed.
+Never resend that motion, switch methods to bypass the failure, or restart the
+simulator. An unconfirmed stop must remain explicitly unconfirmed.
 stop_navigation only affects an owned route. A new task is needed for another motion attempt.
 Routine decisions should use navigation status tools; read logs only for concrete failure diagnosis.
 Every task must end with the finish tool, using status and summary; a plain-text
@@ -167,37 +156,7 @@ Finish success only after every requested stage has the required verified eviden
 otherwise finish failure, or stuck for ambiguity, missing capability or unverified arrival.
 Summarize completed/remaining stages, method, final pose, errors and confirmed stopping.
 """
-        )
-    return """You control relative Unitree moves through a multi-robot gateway.
-Use list_robots to discover online robot indices and get_robot_status to query
-one robot. Online means recent connectivity, not permission or ability to move.
-Use execute_command(dx_m, dy_m, arrival_turn_deg, robot_index) for one dis_move.
-An omitted robot index uses the configured default, if one exists. Do not guess
-which robot the user means; indices may change after gateway restart or reconnect.
-dx_m and dy_m are meters in the body frame at the start of EACH move: +x forward,
-+y left. The target stays fixed during that move. The body first turns toward the
-target and walks forward, stops, then turns arrival_turn_deg relative to its actual
-arrival heading (+left, -right). A rear target means turning around and walking
-forward, not backward walking. Rear-target hardware execution is not fully validated.
-Use zero for an unrequested lateral offset or extra arrival turn. A zero-distance
-command turns in place. Preserve turns such as 450 degrees; do not normalize them.
-All numbers must be finite, and hypot(dx_m, dy_m) must not exceed 5 m per command.
-Do not invent a missing distance, coordinate transform, speed, duration, path list,
-or remote stop command. Ask for missing task details by finishing with status=stuck
-and explaining what is needed. Direct backward walking is not exposed by this API.
-Each motion call waits for execution, stopping, and final acceptance. A valid
-success requires received=true, completed=true, stop_acknowledged=true and finite
-motion_result fields within the default 0.07 m position and 3 degree arrival-turn
-tolerances. Arrival-turn error does not compare the whole total_angle_deg.
-Use the returned actual displacement and errors when reporting the result. These
-are body-side estimates; mode=mock means synthetic results, not hardware motion.
-Follow the requested order. This toolkit serializes motions, including across
-robots; do not promise simultaneous motion. A busy robot rejects a new command.
-After all requested motions complete, call finish with status=success. Query-only
-tasks may finish after their queries. If a call fails, report the error and finish
-with status=failure. Never automatically resend a relative move after timeout or
-failure: it may have partially executed. Disconnect or timeout does not stop it.
-No reference memory or camera observations are available."""
+    )
 
 
 def user_prompt(variables: Mapping[str, object] | None = None) -> PromptNode:
@@ -218,11 +177,4 @@ def user_prompt(variables: Mapping[str, object] | None = None) -> PromptNode:
                 }
             )
         return prompt
-    default_robot = (variables or {}).get("robot_index")
-    return {
-        "TASK": "{{task}}",
-        "COMMAND GATEWAY": "{{env_endpoint}}",
-        "DEFAULT ROBOT": str(default_robot)
-        if default_robot is not None
-        else "none; select explicitly",
-    }
+    return {"TASK": "{{task}}"}

@@ -128,7 +128,7 @@ PY
   export RPENT_SIM_ENDPOINT="$sim_endpoint"
   export RPENT_MODEL="$model"
   printf '[prepare] 准备完成，当前终端已激活虚拟环境并设置 RPENT_NAV_ENDPOINT、RPENT_SIM_ENDPOINT、RPENT_MODEL。\n'
-  printf '[prepare] 请核对上面的点位名称，然后运行文档第 3 节的导航命令。\n'
+  printf '[prepare] 请核对点位名称，按 robots/unitree/MUJOCO_USAGE.zh-CN.md 提交任务。\n'
 }
 
 if _rpent_prepare_mujoco "$@"; then

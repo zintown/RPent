@@ -86,9 +86,8 @@ class RobotToolkit(Toolkit):
 
 
 @pytest.fixture(autouse=True)
-def local_tools(monkeypatch):
-    monkeypatch.setattr("rpent.tools.toolkit.substitute", lambda value: value)
-    monkeypatch.setattr("rpent.planner.api_loop.substitute", lambda value: value)
+def local_tools(tmp_path, monkeypatch):
+    monkeypatch.setattr("rpent.utils.logging._output_dir", tmp_path / "run")
     monkeypatch.setenv("PYDANTIC_AI_NO_BANNER", "1")
 
 
@@ -179,6 +178,28 @@ def test_finish_returns_transcript_for_rpent_without_step_files(tmp_path, monkey
     assert "finish" not in [
         t.name for t in model.last_model_request_parameters.function_tools
     ]
+
+
+def test_mcp_mode_retries_plain_text_until_finish(tmp_path):
+    events = Events()
+    toolkit = RobotToolkit(events)
+    toolkit.require_finish = True
+    requested = []
+
+    async def stream(messages, info):
+        assert info.allow_text_output
+        requested.append(messages)
+        if len(requested) == 1:
+            yield "Task complete."
+        else:
+            yield finish()
+
+    result, _, _ = solve(
+        tmp_path, FunctionModel(stream_function=stream), toolkit, events
+    )
+    assert result.error is None
+    assert result.finish_result == {"_finish": True, **FINISH_ARGS}
+    assert result.stats["turns_used"] == 2
 
 
 def test_refused_finish_retries_without_claiming_success(tmp_path):

@@ -77,7 +77,6 @@ from rpent.planner.base import (
 )
 from rpent.tools.toolkit import Toolkit, ToolResult
 from rpent.utils.logging import get_logger
-from rpent.utils.templates import substitute
 
 logger = get_logger("api")
 
@@ -183,6 +182,14 @@ class ApiAgentLoop(Planner):
                 session,
             ],
         )
+        if getattr(toolkit, "require_finish", False):
+            # Keep automatic tool selection for providers that restrict tool_choice.
+            @agent.output_validator
+            def require_finish(output: Any) -> Any:
+                if adapter.finish_result is None:
+                    raise ModelRetry("Call the finish tool to record the task outcome.")
+                return output
+
         if interaction is not None:
             session.control = DashboardPlannerControl(
                 interaction=interaction,
@@ -314,7 +321,7 @@ class _HarnessToolkit(FunctionToolset):
             spec = {
                 "name": declaration.name,
                 "description": declaration.description,
-                "input_schema": substitute(declaration.input_schema),
+                "input_schema": declaration.model_input_schema,
             }
             name = declaration.name
             self.validators[name] = Draft202012Validator(spec["input_schema"])

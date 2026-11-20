@@ -24,8 +24,11 @@ from robots.unitree.http_client import (
     validate_endpoint,
 )
 from robots.unitree.navigation_client import CoordinateGoal, NavigationClient
-from robots.unitree.protocol import validate_robot_index
-from robots.unitree.real_client import RealRobotClient, relative_command
+from robots.unitree.real_client import (
+    RealRobotClient,
+    relative_command,
+    validate_robot_index,
+)
 from robots.unitree.real_toolkit import RealRobotToolkit
 from rpent.dashboard.events import NullDashboardEventSink
 from rpent.evaluation import write_json_atomic

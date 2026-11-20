@@ -17,14 +17,19 @@
 import argparse
 import io
 import json
+import socket
 import sys
+import threading
+import time
+from contextlib import closing, contextmanager
 
 import pytest
+import uvicorn
 from pydantic_ai.messages import ToolReturnPart
 from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 
 from rpent.dashboard.events import NullDashboardEventSink
-from rpent.robots import get_robot_spec
+from rpent.robots import get_robot_spec, get_toolkit
 
 
 def args_for(tmp_path, *flags):
@@ -91,7 +96,8 @@ def test_mode_selects_navigation_runtime_and_prompt(
     "flags",
     [
         ["--robot-index", "1"],
-        ["--env-timeout-s", "10"],
+        ["--task", "   "],
+        ["--memory-profile", "hf"],
         ["--navigation-timeout-s", "nan"],
         ["--navigation-timeout-s", "0"],
         ["--nav-endpoint", "socket://localhost:1"],
@@ -156,8 +162,116 @@ def test_selected_empty_runtime_does_not_contact_services(
     assert not navigation_services.state.requests
 
 
+@contextmanager
+def serve_mcp(mcp):
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+        server = uvicorn.Server(
+            uvicorn.Config(mcp.streamable_http_app(), log_level="warning")
+        )
+        worker = threading.Thread(
+            target=server.run, kwargs={"sockets": [listener]}, daemon=True
+        )
+        worker.start()
+        try:
+            deadline = time.monotonic() + 5
+            while not server.started:
+                assert time.monotonic() < deadline and worker.is_alive()
+                time.sleep(0.01)
+            yield f"http://127.0.0.1:{port}/mcp"
+        finally:
+            server.should_exit = True
+            worker.join(5)
+            assert not worker.is_alive()
+
+
+@pytest.fixture(params=[False, True], ids=["http", "http-with-scene-mcp"])
+def navigation_args(request, tmp_path):
+    if not request.param:
+        yield []
+        return
+
+    from mcp.server.fastmcp import FastMCP
+
+    mcp = FastMCP("scene", stateless_http=True, json_response=True)
+
+    @mcp.tool()
+    def lookup(name: str) -> dict[str, str]:
+        """Look up a named scene object."""
+        return {"name": name, "waypoint_id": "wp_01"}
+
+    with serve_mcp(mcp) as url:
+        path = tmp_path / "mcp.toml"
+        path.write_text(
+            f'[mcp_servers.scene]\nurl = "{url}"\nenabled_tools = ["lookup"]\n',
+            encoding="utf-8",
+        )
+        yield ["--mcp-config", str(path)]
+
+
+def test_mcp_mode_uses_discovered_services_to_execute_the_saved_plan(
+    tmp_path,
+    navigation_loopback,
+):
+    from robots.unitree.astar_mcp import create_astar_mcp
+    from robots.unitree.mujoco_mcp import create_mujoco_mcp
+    from rpent.tools.mcp_client import McpClient, McpServerConfig
+
+    services = navigation_loopback
+    services.state.polls_before_finish = 0
+    astar = create_astar_mcp(services.nav, host="127.0.0.1", port=0)
+    with (
+        serve_mcp(astar) as astar_url,
+        closing(McpClient("astar", McpServerConfig(url=astar_url))) as planner,
+    ):
+        sim = create_mujoco_mcp(services.sim, planner, host="127.0.0.1", port=0)
+        with serve_mcp(sim) as sim_url:
+            args = args_for(tmp_path, "--unitree-mode", "mcp")
+            args.memory_profile = "local"
+            args.memory_dir = str(tmp_path / "memory")
+            args.mcp_servers = {
+                "astar": McpServerConfig(
+                    url=astar_url, enabled_tools=["list_waypoints", "plan_route"]
+                ),
+                "mujoco": McpServerConfig(
+                    url=sim_url, enabled_tools=["get_pose", "follow_plan"]
+                ),
+            }
+            spec = get_robot_spec("unitree")
+            config = spec.parse_config(args)
+            sink = NullDashboardEventSink()
+            assert spec.init_runtime(args, tmp_path, sink, None) == ([], {})
+            with closing(
+                get_toolkit(
+                    "unitree", runtime_kwargs={}, dashboard_events=sink, config=config
+                )
+            ) as toolkit:
+                toolkit.add_mcp_tools(args.mcp_servers)
+                names = {tool.name for tool in toolkit.list_tools()}
+                assert not {"plan_navigation", "follow_navigation"} & names
+                pose = toolkit.execute_tool("mcp__mujoco__get_pose", {}).data[
+                    "structured_content"
+                ]
+                route = toolkit.execute_tool(
+                    "mcp__astar__plan_route",
+                    {
+                        "start": {key: pose[key] for key in ("x", "y", "yaw")},
+                        "goal": "wp_01",
+                    },
+                ).data["structured_content"]
+                arguments = {"plan_id": route["plan_id"]}
+                walk = toolkit.execute_tool("mcp__mujoco__follow_plan", arguments)
+                assert walk.data["structured_content"]["navigation_completed"] is True
+                assert toolkit.execute_tool(
+                    "mcp__mujoco__follow_plan", arguments
+                ).is_error
+    assert len(services.state.submissions) == 1
+    assert services.state.submissions[0]["legs"][0]["path"] == [[0.0, 0.0], [1.0, 0.0]]
+
+
 def test_public_cli_plans_follows_and_records_native_simulation_result(
-    tmp_path, navigation_loopback, monkeypatch
+    tmp_path, navigation_loopback, navigation_args, monkeypatch
 ):
     from rpent.cli import main as cli
 
@@ -165,6 +279,16 @@ def test_public_cli_plans_follows_and_records_native_simulation_result(
     use_services(monkeypatch, services)
     services.state.polls_before_finish = 0
     requests = []
+
+    def returned_payload(messages, name):
+        returns = [
+            part
+            for message in messages
+            for part in message.parts
+            if isinstance(part, ToolReturnPart) and part.tool_name == name
+        ]
+        content = returns[-1].content
+        return json.loads(content[0] if isinstance(content, list) else content)
 
     async def stream(messages, info):
         names = {tool.name for tool in info.function_tools}
@@ -176,20 +300,27 @@ def test_public_cli_plans_follows_and_records_native_simulation_result(
         assert "execute_command" not in names
         index = len(requests)
         requests.append(messages)
+        if navigation_args:
+            assert "mcp__scene__lookup" in names
+            if index == 0:
+                yield {
+                    0: DeltaToolCall(
+                        name="mcp__scene__lookup",
+                        json_args=json.dumps({"name": "广告牌"}),
+                    )
+                }
+                return
+            if index == 1:
+                assert returned_payload(messages, "mcp__scene__lookup")[
+                    "structured_content"
+                ] == {"name": "广告牌", "waypoint_id": "wp_01"}
+            index -= 1
         if index == 0:
             name, arguments = "list_navigation_goals", {}
         elif index == 1:
             name, arguments = "plan_navigation", {"goals": ["广告牌"]}
         elif index == 2:
-            returns = [
-                part
-                for message in messages
-                for part in message.parts
-                if isinstance(part, ToolReturnPart)
-                and part.tool_name == "plan_navigation"
-            ]
-            content = returns[-1].content
-            payload = json.loads(content[0] if isinstance(content, list) else content)
+            payload = returned_payload(messages, "plan_navigation")
             name, arguments = "follow_navigation", {"plan_id": payload["plan_id"]}
         else:
             name, arguments = "finish", {"status": "success", "summary": "到达广告牌"}
@@ -217,6 +348,7 @@ def test_public_cli_plans_follows_and_records_native_simulation_result(
             services.nav.endpoint,
             "--sim-endpoint",
             services.sim.endpoint,
+            *navigation_args,
             "--planner",
             "api",
             "--model",
@@ -224,7 +356,7 @@ def test_public_cli_plans_follows_and_records_native_simulation_result(
             "--reasoning-effort",
             "none",
             "--max-turns",
-            "4",
+            "5" if navigation_args else "4",
             "--planner-timeout-s",
             "5",
             "--task",
@@ -241,6 +373,10 @@ def test_public_cli_plans_follows_and_records_native_simulation_result(
     assert record["error"] is None
     assert record["finish"]["status"] == "success"
     assert record["unitree_mode"] == "mujoco"
+    if navigation_args:
+        assert any(
+            entry.get("name") == "mcp__scene__lookup" for entry in record["messages"]
+        )
     states = json.loads((tmp_path / "run" / "states.json").read_text())
     assert states["steps"][-1]["state"]["completed_navigation_goals"] == 1
     assert list((tmp_path / "run" / "navigation" / "plans").glob("*.json"))
