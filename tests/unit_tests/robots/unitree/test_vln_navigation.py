@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-import argparse
+import asyncio
 import base64
 import copy
 import json
@@ -27,18 +27,15 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from mcp.shared.memory import create_connected_server_and_client_session
 from websockets.sync.server import serve
 
 from robots.unitree.http_client import ServiceError
-from robots.unitree.mujoco_toolkit import UnitreeMujocoToolkit
-from robots.unitree.observation_client import ObservationClient
-from robots.unitree.robot_spec import get_robot_spec
+from robots.unitree.mcp.vln.model_client import VlnClient, validate_vln_endpoint
+from robots.unitree.mcp.vln.navigation import VlnCancelled, VlnNavigation
+from robots.unitree.mcp.vln.observation_client import ObservationClient
+from robots.unitree.mcp.vln.server import create_vln_mcp
 from robots.unitree.simulation_client import SimulationClient
-from robots.unitree.vln_client import VlnClient, validate_vln_endpoint
-from robots.unitree.vln_navigation import VlnNavigation
-from rpent.dashboard.events import NullDashboardEventSink
-from rpent.memory import MemoryManager
-from rpent.tools.toolkit import ToolCancelled
 
 IDENTITY = {"map_id": "test_room", "map_version": "v1"}
 
@@ -255,7 +252,7 @@ def test_pending_prediction_is_cancelled_and_owned_control_is_released(tmp_path)
         future = pool.submit(run, control)
         assert model.started.wait(1.0)
         control.cancel()
-        with pytest.raises(ToolCancelled):
+        with pytest.raises(VlnCancelled):
             future.result(timeout=2)
     assert not control.active and control.snapshot()["state"] == "cancelled"
     assert control.snapshot()["stop_confirmed"] and not control.sim.requests
@@ -407,80 +404,37 @@ def test_control_http_client_forwards_waypoints_and_uses_owned_stop_id():
     assert requests[-1] == ("/control/stop", {"control_id": "control_1"})
 
 
-def test_toolkit_exposes_vln_and_cannot_finish_unverified_success(
-    tmp_path, navigation_services
-):
-    sim = FakeSimulation()
-    toolkit = UnitreeMujocoToolkit(
-        nav=navigation_services.nav,
-        sim=sim,
-        vln=FakeModel(),
-        observation=FakeObservation(),
-        dashboard_events=NullDashboardEventSink(),
-        memory=MemoryManager(tmp_path / "memory"),
-        state_output_dir=tmp_path / "run",
-    )
-    try:
-        result = toolkit.execute_tool(
-            "run_vln_navigation", {"instruction": "go to the doorway"}
+def test_mcp_tools_return_evidence_and_enforce_the_episode_budget(tmp_path):
+    async def exercise():
+        sim = FakeSimulation()
+        control = VlnNavigation(
+            sim=sim,
+            observation=FakeObservation(),
+            model=FakeModel(),
+            artifacts=tmp_path,
         )
-        assert not result.is_error, result.data
-        assert result.data["state"] == "verification_required"
-        assert toolkit.execute_tool(
-            "finish", {"status": "success", "summary": "arrived"}
-        ).is_error
-        assert toolkit.state.get().state["vln"]["stop_confirmed"]
-    finally:
-        toolkit.close()
+        async with create_connected_server_and_client_session(
+            create_vln_mcp(control, timeout_s=2)
+        ) as client:
+            tools = await client.list_tools()
+            assert {tool.name for tool in tools.tools} == {
+                "run_vln_navigation",
+                "get_vln_status",
+                "stop_vln_navigation",
+            }
+            invalid = await client.call_tool(
+                "run_vln_navigation", {"instruction": "stop", "timeout_s": 3}
+            )
+            assert invalid.isError
+            assert not sim.requests
+            result = await client.call_tool(
+                "run_vln_navigation", {"instruction": "stop"}
+            )
+            assert not result.isError, result
+            assert result.structuredContent["state"] == "verification_required"
+            assert result.structuredContent["stop_confirmed"] is True
+            status = await client.call_tool("get_vln_status", {})
+            assert status.structuredContent["active_control_id"] is None
+            assert status.structuredContent["goal_verified"] is False
 
-
-def test_toolkit_can_finish_after_vln_verifies_arrival(tmp_path, navigation_services):
-    toolkit = UnitreeMujocoToolkit(
-        nav=navigation_services.nav,
-        sim=FakeSimulation(),
-        vln=FakeModel(),
-        observation=FakeObservation(),
-        dashboard_events=NullDashboardEventSink(),
-        memory=MemoryManager(tmp_path / "memory"),
-        state_output_dir=tmp_path / "run",
-    )
-    try:
-        result = toolkit.execute_tool(
-            "run_vln_navigation",
-            {"instruction": "stop here", "expected_goal": {"x": 0.0, "y": 0.0}},
-        )
-        assert not result.is_error, result.data
-        assert result.data["goal_verified"] and result.data["stop_confirmed"]
-        assert toolkit.state.get().state["completed_navigation_goals"] == 1
-        assert not toolkit.execute_tool(
-            "finish", {"status": "success", "summary": "verified"}
-        ).is_error
-    finally:
-        toolkit.close()
-
-
-def test_cli_vln_configuration_registers_optional_tools_without_gpu_imports(tmp_path):
-    parser = argparse.ArgumentParser()
-    for name in ("output-dir", "memory-dir"):
-        parser.add_argument("--" + name, default=None)
-    get_robot_spec().add_cli_args(parser, False)
-    args = parser.parse_args(
-        [
-            "--task",
-            "go",
-            "--unitree-mode",
-            "mujoco",
-            "--vln-endpoint",
-            "ws://127.0.0.1:8050",
-            "--observation-endpoint",
-            "http://127.0.0.1:8771",
-        ]
-    )
-    config = get_robot_spec().parse_config(args)
-    assert config.prompt_vars["vln_endpoint"] == "ws://127.0.0.1:8050"
-    assert "run_vln_navigation" in get_robot_spec().prompts.render(
-        "system", variables=config.prompt_vars
-    )
-    args.observation_endpoint = None
-    with pytest.raises(ValueError, match="provided together"):
-        get_robot_spec().parse_config(args)
+    asyncio.run(exercise())

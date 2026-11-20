@@ -207,7 +207,9 @@ class TaskRunner:
             pass
         try:
             real_robot = _read_json(output / "real" / "latest.json")
-            record["navigation"] = {"real_robot": real_robot}
+            record["navigation"] = (record["navigation"] or {}) | {
+                "real_robot": real_robot
+            }
         except (OSError, ValueError):
             pass
         transcripts = sorted(output.glob("transcript_unitree*.json"))

@@ -1,28 +1,22 @@
 # Unitree 接入
 
-| 模式 | 运行方式 | 使用说明 |
-| --- | --- | --- |
-| `mcp` | RPent 从配置发现 A* 和 MuJoCo MCP 服务，按计划编号执行地图导航 | [仿真导航](MUJOCO_USAGE.zh-CN.md) |
-| `mujoco` | 直接连接 A* 和 MuJoCo，可启用 LightNav 图像导航 | [LightNav](VLN_USAGE.zh-CN.md) |
-| `real` | 通过 Go2 通信服务的 HTTP `/call` 查询、相对移动、抓拍和停止 | [真机接入](REAL_USAGE.zh-CN.md)、[A* 真机验证](REAL_TEST_PLAN.zh-CN.md) |
-
-直接运行 `rpent --robot unitree` 时默认使用 `mcp`，需提供 `--mcp-config`。`run_rpent.sh` 默认使用 `mujoco` 模式，设置 `RPENT_UNITREE_MODE=mcp` 可切换到 MCP 仿真。命令行任务需在终端中执行，任务服务会自动为子进程分配终端。
-
-[RPent 任务 MCP 服务](TASK_MCP.zh-CN.md)负责接收外部中控发来的完整任务，以及提供查询、日志和取消接口。中控在自己的服务器上配置 RPent 的网络地址和任务令牌。RPent 根据本机选择的模式调用导航或真机服务。
-
-## 代码入口
-
-| 文件 | 职责 |
-| --- | --- |
-| [robot_spec.py](robot_spec.py)、[prompt_bundle.py](prompt_bundle.py) | 运行模式、参数与模型提示 |
-| [mcp/astar/server.py](mcp/astar/server.py)、[mcp/mujoco/server.py](mcp/mujoco/server.py) | A* 规划与 MuJoCo 执行的 MCP 入口 |
-| [navigation_client.py](navigation_client.py)、[simulation_client.py](simulation_client.py) | 地图、路径、位姿和仿真执行接口 |
-| [mujoco_toolkit.py](mujoco_toolkit.py)、[vln_navigation.py](vln_navigation.py) | 仿真执行、LightNav 推理和图像航点控制 |
-| [mcp/task/server.py](mcp/task/server.py)、[mcp/task/tools.py](mcp/task/tools.py)、[mcp/task/runner.py](mcp/task/runner.py) | DSH 任务入口、调度工具、子进程与执行记录 |
-| [real_client.py](real_client.py)、[real_toolkit.py](real_toolkit.py) | 真机通信、异步请求状态和停车确认 |
-
-在仓库根目录运行离线测试。
+RPent 从 MCP 配置发现 Unitree 服务。任务通过同一个命令执行。
 
 ```bash
-python -m pytest tests/unit_tests/robots/unitree -q
+export RPENT_VENV_DIR="$(cd .. && pwd)/.venv"
+bash run_rpent.sh "$(date -u +%Y%m%dT%H%M%SZ)" '查询 Go2 当前位姿'
 ```
+
+在 RPent 仓库根目录运行。脚本加载私有 `.env.local` 和默认的 `mcp.toml`。用 `RPENT_MCP_CONFIG` 选择其他 MCP 配置，直接运行 RPent CLI 时用 `--mcp-config` 指定配置。
+
+| 服务 | MCP 入口 | 使用说明 |
+| --- | --- | --- |
+| A* | [mcp/astar/server.py](mcp/astar/server.py) | [地图规划](MUJOCO_USAGE.zh-CN.md) |
+| MuJoCo | [mcp/mujoco/server.py](mcp/mujoco/server.py) | [仿真执行](MUJOCO_USAGE.zh-CN.md) |
+| LightNav | [mcp/vln/server.py](mcp/vln/server.py) | [视觉导航](VLN_USAGE.zh-CN.md) |
+| Go2 真机 | [mcp/real/server.py](mcp/real/server.py) | [真机接入](REAL_USAGE.zh-CN.md)、[A* 短路线测试](REAL_TEST_PLAN.zh-CN.md) |
+| 任务调度 | [mcp/task/server.py](mcp/task/server.py) | [DSH 接入](TASK_MCP.zh-CN.md) |
+
+A* 和 MuJoCo 转接服务使用 Streamable HTTP。LightNav 和 Go2 真机转接程序使用 stdio，由 RPent 为每条任务启动。它们各自连接已运行的推理、仿真或真机通信进程。
+
+直接运行 RPent CLI 并启用上述 stdio 配置时，将 `RPENT_TASK_OUTPUT_DIR` 设为 `--output-dir` 对应的绝对路径。使用 `run_rpent.sh` 时脚本会自动设置。

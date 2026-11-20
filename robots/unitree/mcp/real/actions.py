@@ -4,26 +4,27 @@
 # You may obtain a copy of the License at
 # https://www.apache.org/licenses/LICENSE-2.0
 
-"""Planner tools for a physical Go2 on the Unitree communication service."""
+"""Execute physical Go2 requests and reconcile their stopping evidence."""
 
 from __future__ import annotations
 
+import math
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Literal
+from threading import Lock
+from typing import Any
 from uuid import uuid4
 
+from anyio import from_thread
+
 from robots.unitree.http_client import ServiceError, finite_number
-from robots.unitree.real_client import (
+from robots.unitree.mcp.real.client import (
     RealRobotClient,
     RobotRequestRejected,
     relative_command,
 )
-from rpent.dashboard.events import DashboardEventSink
 from rpent.evaluation import write_json_atomic
-from rpent.memory import MemoryManager
-from rpent.session import EnvState
-from rpent.tools import Toolkit, ToolResult, tool
 
 _POLL_INTERVAL_S = 1.0
 _STOP_BUDGET_S = 12.0
@@ -86,36 +87,30 @@ def _summary(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _failed(record: dict[str, Any], action: str) -> ToolResult:
+def _failed(record: dict[str, Any], action: str) -> ServiceError:
     feedback = record.get("result")
     reason = record.get("error") or (
         feedback.get("reason") if isinstance(feedback, dict) else None
     )
-    return ToolResult(
-        data={
-            **_summary(record),
-            "error": f"{action} not confirmed ({record['status']}): {reason or 'no final evidence'}",
-        }
+    return ServiceError(
+        f"{action} request {record['request_id']} not confirmed "
+        f"({record['status']}): {reason or 'no final evidence'}"
     )
 
 
-class RealRobotToolkit(Toolkit):
+class RealRobotActions:
     """Serialize real robot actions and retain evidence when motion is uncertain."""
 
     def __init__(
         self,
         *,
         real: RealRobotClient,
-        dashboard_events: DashboardEventSink,
-        memory: MemoryManager,
         state_output_dir: Path,
         action_timeout_s: float,
     ) -> None:
-        super().__init__(
-            dashboard_events=dashboard_events,
-            memory=memory,
-            state=EnvState(state_output_dir),
-        )
+        if not math.isfinite(action_timeout_s) or action_timeout_s <= 0:
+            raise ValueError("action timeout must be finite and positive")
+        self._action_lock = Lock()
         self._env = real
         self._timeout_s = action_timeout_s
         self._state_path = state_output_dir / "real" / "latest.json"
@@ -130,21 +125,24 @@ class RealRobotToolkit(Toolkit):
         self._stop_error: str | None = None
         self._error: str | None = None
         self._completed = 0
-        self.add_tools(
-            (
-                self.list_robots,
-                self.get_robot_status,
-                self.move_relative,
-                self.capture_image,
-                self.get_robot_request,
-                self.stop_robot,
-            )
-        )
-        self.add_tool(self.finish_real, replace=True)
         self._persist()
-        with self.state.record_step(state=self._snapshot()):
-            pass
-        self._publish_step(self.state.get())
+
+    def perform(
+        self, action: Callable[..., dict[str, Any]], *args: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        """Allow one action at a time, retaining any error in the task evidence."""
+        if not self._action_lock.acquire(blocking=False):
+            raise ServiceError("a Go2 action is already in progress")
+        try:
+            return action(*args, **kwargs)
+        except Exception as exc:
+            self._error = str(exc)
+            raise
+        finally:
+            try:
+                self._persist()
+            finally:
+                self._action_lock.release()
 
     def _snapshot(self) -> dict[str, Any]:
         return {
@@ -199,7 +197,7 @@ class RealRobotToolkit(Toolkit):
     ) -> dict[str, Any]:
         while record["status"] == "queued":
             if interruptible:
-                self.raise_if_cancelled()
+                from_thread.check_cancelled()
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError(
@@ -207,7 +205,7 @@ class RealRobotToolkit(Toolkit):
                 )
             time.sleep(min(_POLL_INTERVAL_S, remaining))
             if interruptible:
-                self.raise_if_cancelled()
+                from_thread.check_cancelled()
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError(
@@ -233,7 +231,7 @@ class RealRobotToolkit(Toolkit):
             ) from error
         return record
 
-    def _stop(self, *, explicit: bool) -> ToolResult:
+    def _stop(self, *, explicit: bool) -> dict[str, Any]:
         deadline = time.monotonic() + _STOP_BUDGET_S
         self._ready()
         key = uuid4().hex
@@ -278,31 +276,11 @@ class RealRobotToolkit(Toolkit):
         self._stop_confirmed = confirmed
         self._stop_error = None
         self._persist()
-        return ToolResult(data={**_summary(record), "stop_confirmed": confirmed})
+        return {**_summary(record), "stop_confirmed": confirmed}
 
-    @tool(readonly=True)
-    def list_robots(self) -> ToolResult:
-        """List live robot indices from the communication service."""
-        return ToolResult(data=self._env.list_robots())
-
-    @tool(readonly=True)
-    def get_robot_status(self) -> ToolResult:
-        """Read the assigned robot's cached connection, heartbeat and camera state."""
-        return ToolResult(data=self._env.health())
-
-    @tool(readonly=True)
-    def get_robot_request(self, request_id: str) -> ToolResult:
-        """Inspect one request record for the assigned robot.
-
-        Args:
-            request_id: Server UUID returned for the move, capture or stop.
-        """
-        return ToolResult(data=_summary(self._env.get_request(request_id)))
-
-    @tool
     def move_relative(
         self, dx_m: float, dy_m: float, arrival_turn_deg: float
-    ) -> ToolResult:
+    ) -> dict[str, Any]:
         """Turn toward a relative target, walk to it, then apply an extra turn.
 
         Args:
@@ -313,7 +291,7 @@ class RealRobotToolkit(Toolkit):
         self._allow_action()
         command = relative_command(dx_m, dy_m, arrival_turn_deg)
         self._ready(movement=True)
-        self.raise_if_cancelled()
+        from_thread.check_cancelled()
         key = uuid4().hex
         self._move_key = key
         self._last_move_id = self._last_move_status = None
@@ -342,9 +320,9 @@ class RealRobotToolkit(Toolkit):
                 self._stop_confirmed = _motion_stopped(record)
                 self._clear_motion()
             if not _completed_move(record):
-                return _failed(record, "relative move")
+                raise _failed(record, "relative move")
             self._completed += 1
-            return ToolResult(data=_summary(record))
+            return _summary(record)
         finally:
             if self._move_key is not None:
                 try:
@@ -354,10 +332,9 @@ class RealRobotToolkit(Toolkit):
                     self._stop_confirmed = False
             self._persist()
 
-    @tool
     def capture_image(
         self, rgbd: bool = False, after_motion: bool = False
-    ) -> ToolResult:
+    ) -> dict[str, Any]:
         """Wait for a capture and report metadata and files on the robot.
 
         Args:
@@ -366,7 +343,7 @@ class RealRobotToolkit(Toolkit):
         """
         self._allow_action()
         self._ready()
-        self.raise_if_cancelled()
+        from_thread.check_cancelled()
         deadline = time.monotonic() + self._timeout_s
         key = uuid4().hex
         try:
@@ -394,11 +371,10 @@ class RealRobotToolkit(Toolkit):
                 )
             )
         ):
-            return _failed(record, "capture")
-        return ToolResult(data=_summary(record))
+            raise _failed(record, "capture")
+        return _summary(record)
 
-    @tool
-    def stop_robot(self) -> ToolResult:
+    def stop_robot(self) -> dict[str, Any]:
         """Request stop and queue clearing for the assigned robot, then check evidence."""
         self._stop_id = None
         self._stop_confirmed = None
@@ -409,52 +385,4 @@ class RealRobotToolkit(Toolkit):
         except (ServiceError, TimeoutError) as exc:
             self._stop_error = str(exc)
             self._stop_confirmed = False
-            return ToolResult(
-                data={
-                    "error": str(exc),
-                    "stop_request_id": self._stop_id,
-                    "stop_confirmed": False,
-                }
-            )
-
-    @tool(name="finish", readonly=True)
-    def finish_real(
-        self, status: Literal["success", "failure", "stuck"], summary: str
-    ) -> ToolResult:
-        """Finish using confirmed robot feedback or report an unresolved task.
-
-        Args:
-            status: success, failure, or stuck.
-            summary: State what was confirmed and what remains unresolved.
-        """
-        if status == "success" and (self._move_key or self._stop_error or self._error):
-            return ToolResult(
-                data={
-                    "error": "a real robot action failed or has an unresolved outcome"
-                }
-            )
-        return ToolResult(data={"_finish": True, "status": status, "summary": summary})
-
-    def get_env_state(
-        self, *, command: dict[str, Any], result: dict[str, Any], elapsed_s: float
-    ) -> ToolResult:
-        """Persist compact request evidence for the task runner and transcript."""
-        if result.get("error"):
-            self._error = str(result["error"])
-        self._persist()
-        with self.state.record_step(
-            state=self._snapshot(),
-            command=command,
-            result=result,
-            elapsed_s=elapsed_s,
-            extras={"validation_scope": "real_relative_actions"},
-        ) as step:
-            pass
-        return ToolResult(data={**result, "step": step})
-
-    def close(self) -> None:
-        """Allow in-flight tool cancellation to reconcile motion before closing HTTP."""
-        try:
-            super().close()
-        finally:
-            self._env.close()
+            raise

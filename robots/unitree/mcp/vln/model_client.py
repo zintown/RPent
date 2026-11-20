@@ -143,15 +143,6 @@ class VlnClient:
                     f"VLN prediction failed; request not retried: {exc}"
                 ) from exc
 
-    def health(self) -> dict[str, Any]:
-        """Probe a separate connection without resetting an active model episode."""
-        other = VlnClient(self.endpoint, timeout_s=min(self.timeout_s, 3.0))
-        try:
-            other.start_episode("rpent-health")
-            return {"ok": True, "endpoint": self.endpoint}
-        finally:
-            other.close()
-
     def close(self) -> None:
         """Interrupt any pending receive and close only this client's connection."""
         with self._lock:

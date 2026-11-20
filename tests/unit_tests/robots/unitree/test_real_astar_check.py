@@ -4,22 +4,19 @@
 # You may obtain a copy of the License at
 # https://www.apache.org/licenses/LICENSE-2.0
 
-"""Check the two service requests and the operator boundary of a short A* move."""
+"""Verify the operator-confirmed diagnostic uses A* and Go2 through MCP."""
 
 import io
 import json
 import math
 import sys
+from typing import Any
 
-import httpx
 import pytest
+from mcp.server.fastmcp import FastMCP
 
-from robots.unitree import real_astar_check
-from robots.unitree.navigation_client import NavigationClient
-from robots.unitree.real_client import RealRobotClient
+from robots.unitree.mcp.real import astar_check
 
-IDENTITY = {"map_id": "site", "map_version": "v1"}
-START = {"x": 1.0, "y": 2.0, "yaw": math.pi / 2}
 REQUEST_ID = "27b1bdf4-e894-42c7-b44f-175c13bd35d2"
 
 
@@ -28,40 +25,40 @@ class TerminalInput(io.StringIO):
         return True
 
 
-def make_plan(goal, *, detour=False, warning=False):
-    path = [[START["x"], START["y"]], [goal["x"], goal["y"]]]
-    if detour:
-        path.insert(1, [1.1, 2.15])
-    length = sum(math.dist(a, b) for a, b in zip(path, path[1:]))
-    return {
-        "ok": True,
-        **IDENTITY,
-        "frame": "map",
-        "units": {"length": "meter", "angle": "radian"},
-        "start": START,
-        "total_length": length,
-        "warnings": ["start outside the corridor"] if warning else [],
-        "legs": [
-            {
-                "goal": {"stand_pose": goal},
-                "path": path,
-                "length": length,
-                "headings": [
-                    math.atan2(b[1] - a[1], b[0] - a[0]) for a, b in zip(path, path[1:])
-                ],
-            }
-        ],
-    }
+@pytest.fixture
+def diagnostic_config(tmp_path, mcp_navigation, serve_mcp, monkeypatch):
+    moves = []
+    robot = FastMCP("test-go2", stateless_http=True, json_response=True)
+
+    @robot.tool()
+    def get_robot_status() -> dict[str, Any]:
+        return {"robot_index": 1, "status": "online"}
+
+    @robot.tool()
+    def move_relative(
+        dx_m: float, dy_m: float, arrival_turn_deg: float
+    ) -> dict[str, Any]:
+        moves.append((dx_m, dy_m, arrival_turn_deg))
+        return {"status": "completed", "request_id": REQUEST_ID}
+
+    monkeypatch.delenv("RPENT_TASK_OUTPUT_DIR", raising=False)
+    with serve_mcp(robot) as real_url:
+        path = tmp_path / "diagnostic.toml"
+        path.write_text(
+            f'[mcp_servers.astar]\nurl = "{mcp_navigation.astar_url}"\n'
+            f'[mcp_servers.real]\nurl = "{real_url}"\n'
+        )
+        yield path, moves
 
 
-def argv(out, *, goal_y=2.3, execute=True):
+def argv(config, out, *, goal_y=2.3, version="v1", execute=True):
     flags = [
-        "--nav-endpoint",
-        "http://astar.test",
+        "--mcp-config",
+        str(config),
         "--map-id",
-        "site",
+        "test_room",
         "--map-version",
-        "v1",
+        version,
         "--start",
         "1",
         "2",
@@ -71,119 +68,26 @@ def argv(out, *, goal_y=2.3, execute=True):
         str(goal_y),
         "--output-dir",
         str(out),
-        "--real-endpoint",
-        "http://go2.test:9001",
-        "--robot-index",
-        "1",
     ]
     return flags + (["--execute"] if execute else [])
 
 
-def test_confirmed_short_plan_uses_actual_gateway_client_and_polling(
-    tmp_path, monkeypatch
+def test_confirmed_short_plan_sends_one_body_frame_move(
+    tmp_path, diagnostic_config, monkeypatch, navigation_services
 ):
-    calls = []
-    queued = {}
+    config, moves = diagnostic_config
     out = tmp_path / "check"
-
-    def send(request):
-        if request.url.host == "astar.test":
-            path = request.url.path
-            calls.append(path)
-            if path == "/health":
-                return httpx.Response(200, json={"ok": True, **IDENTITY})
-            assert request.method == "POST" and path == "/plan"
-            payload = json.loads(request.content)
-            assert payload["start"] == START
-            return httpx.Response(200, json=make_plan(payload["goals"][0]))
-
-        assert request.url.host == "go2.test" and request.url.path == "/call"
-        payload = json.loads(request.content)
-        method = payload["method"]
-        calls.append(method)
-        if method == "healthz":
-            result = {
-                "robot_index": 1,
-                "status": "online",
-                "connected": True,
-                "heartbeat_healthy": True,
-                "connected_at_unix": 1795060800,
-            }
-        elif method == "env.execute_command":
-            assert (out / "plan.json").is_file()
-            assert payload["kwargs"]["robot_index"] == 1
-            assert payload["idempotency_key"] == payload["request_id"]
-            command = payload["args"][0]
-            assert command["type"] == "move_relative"
-            assert command["payload"] == pytest.approx(
-                {"dx_m": 0.3, "dy_m": 0, "arrival_turn_deg": 0}
-            )
-            queued.update(
-                request_id=REQUEST_ID,
-                client_request_id=payload["request_id"],
-                robot_index=1,
-                operation="move_relative",
-                status="queued",
-                result_available=False,
-                outcome_known=False,
-                result=None,
-                error=None,
-            )
-            result = queued
-        else:
-            assert (
-                method == "env.get_request"
-                and payload["kwargs"]["request_id"] == REQUEST_ID
-            )
-            result = dict(
-                queued,
-                status="completed",
-                result_available=True,
-                outcome_known=True,
-                result={
-                    "type": "command_result",
-                    "robot_index": 1,
-                    "request_id": REQUEST_ID,
-                    "status": "completed",
-                    "completed": True,
-                    "dry_run": False,
-                    "exit_code": 0,
-                    "reason": "completed",
-                    "result": {
-                        "success": True,
-                        "arrival_phase_started": True,
-                        "final_state_available": True,
-                        "stop_ack": True,
-                    },
-                },
-            )
-        return httpx.Response(200, json={"ok": True, "result": result})
-
-    with httpx.Client(transport=httpx.MockTransport(send)) as http:
-        monkeypatch.setattr(
-            real_astar_check,
-            "NavigationClient",
-            lambda endpoint: NavigationClient(endpoint, client=http),
-        )
-        monkeypatch.setattr(
-            real_astar_check,
-            "RealRobotClient",
-            lambda endpoint, robot_index: RealRobotClient(
-                endpoint, robot_index=robot_index, client=http
-            ),
-        )
-        monkeypatch.setattr(sys, "stdin", TerminalInput("MOVE\n"))
-        assert real_astar_check.main(argv(out)) == 0
-
-    assert calls == [
-        "/health",
-        "/plan",
-        "healthz",
-        "env.execute_command",
-        "env.get_request",
-    ]
+    monkeypatch.setattr(sys, "stdin", TerminalInput("MOVE\n"))
+    assert astar_check.main(argv(config, out)) == 0
+    assert len(moves) == 1
+    assert moves[0] == pytest.approx((0.3, 0, 0))
+    plan = json.loads((out / "plan.json").read_text())
+    assert plan["legs"][0]["path"] == [[1.0, 2.0], [1.0, 2.3]]
     assert json.loads((out / "execution.json").read_text())["request_id"] == REQUEST_ID
-    assert json.loads((out / "real/latest.json").read_text())["stop_confirmed"] is True
+    assert [path for _, _, path, _ in navigation_services.state.requests] == [
+        "/waypoints",
+        "/plan",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -197,40 +101,28 @@ def test_confirmed_short_plan_uses_actual_gateway_client_and_polling(
         ("wrong-map", 1),
     ],
 )
-def test_diagnostic_does_not_contact_go2_without_a_confirmed_eligible_route(
-    tmp_path, monkeypatch, case, expected
+def test_diagnostic_requires_an_eligible_route_and_operator_confirmation(
+    tmp_path, diagnostic_config, monkeypatch, navigation_services, case, expected
 ):
-    def send(request):
-        assert request.url.host == "astar.test"
-        if request.url.path == "/health":
-            identity = (
-                IDENTITY | {"map_version": "other"} if case == "wrong-map" else IDENTITY
-            )
-            return httpx.Response(200, json={"ok": True, **identity})
-        body = json.loads(request.content)
-        return httpx.Response(
-            200,
-            json=make_plan(
-                body["goals"][0], detour=case == "detour", warning=case == "warning"
-            ),
-        )
+    config, moves = diagnostic_config
+    out = tmp_path / "check"
 
-    def unexpected_gateway(*args, **kwargs):
-        pytest.fail("diagnostic contacted a robot before confirming an eligible plan")
+    def mutate(plan):
+        if case == "detour":
+            plan["legs"][0]["path"].insert(1, [1.1, 2.15])
+            plan["legs"][0]["headings"].append(math.pi / 2)
+        elif case == "warning":
+            plan["warnings"].append("start outside the corridor")
 
-    with httpx.Client(transport=httpx.MockTransport(send)) as http:
-        monkeypatch.setattr(
-            real_astar_check,
-            "NavigationClient",
-            lambda endpoint: NavigationClient(endpoint, client=http),
-        )
-        monkeypatch.setattr(real_astar_check, "RealRobotClient", unexpected_gateway)
-        monkeypatch.setattr(sys, "stdin", TerminalInput("\n"))
-        flags = argv(
-            tmp_path / "check",
-            goal_y=2.8 if case == "long" else 2.3,
-            execute=case != "preview",
-        )
-        assert real_astar_check.main(flags) == expected
-
-    assert not (tmp_path / "check/execution.json").exists()
+    navigation_services.state.plan_mutator = mutate
+    monkeypatch.setattr(sys, "stdin", TerminalInput("\n"))
+    flags = argv(
+        config,
+        out,
+        goal_y=2.8 if case == "long" else 2.3,
+        version="other" if case == "wrong-map" else "v1",
+        execute=case != "preview",
+    )
+    assert astar_check.main(flags) == expected
+    assert not moves
+    assert not (out / "execution.json").exists()

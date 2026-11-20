@@ -1,36 +1,16 @@
 # RPent + A* + Go2 真机测试
 
-测试链路为 **RPent → A* `/plan` → Go2 通信程序 `/call` → 机器狗**。在机器狗还没有地图定位接口的情况下，使用现场实测的地图起点和朝向，执行一段短直线。RPent 的 `real_astar_check` 命令负责规划、坐标换算、提交动作和查询结果。首轮测试使用人工验收到达位置。
+测试链路为 **RPent → A* MCP 规划 → Go2 MCP 相对移动 → 机器狗**。在机器狗还没有地图定位接口的情况下，使用现场实测的地图起点和朝向，执行一段短直线。RPent 的 `real_astar_check` 命令负责规划、坐标换算、提交动作和查询结果。首轮测试使用人工验收到达位置。
 
-## 1. 核对 A* 和 Go2 通信地址
+## 1. 准备 MCP 配置
 
-在 RPent 服务器的 Bash 终端执行。下例假设 A* 和 Go2 通信程序都在服务器本机。
-
-```bash
-cd /home/yanlinjie/robot_project/rpent
-export RPENT_NAV_ENDPOINT=http://127.0.0.1:8765
-export RPENT_REAL_ENDPOINT=http://127.0.0.1:9001
-
-curl --noproxy '*' -fsS --max-time 5 "$RPENT_NAV_ENDPOINT/health" | jq
-curl --noproxy '*' -fsS --max-time 5 "$RPENT_REAL_ENDPOINT/call" \
-  -H 'Content-Type: application/json' \
-  --data-binary '{"method":"env.list_robots","args":[],"kwargs":{},"session_id":null}' | jq
-```
-
-| 通信程序部署位置 | `RPENT_REAL_ENDPOINT` |
-| --- | --- |
-| 与 RPent 同机 | `http://127.0.0.1:9001` |
-| 在另一台局域网服务器 | `http://<通信服务器IP>:9001` |
-| 在机器狗上，且服务器能访问它的 `9001/call` | `http://<机器狗IP>:9001` |
-
-`RPENT_REAL_ENDPOINT` 填 HTTP 根地址，RPent 会自动加 `/call`。A* 健康检查应返回 `ok=true`，记录 `map_id` 和 `map_version`，并确认这份地图与测试地点一致。从在线列表核对目标本体的 `robot_index`，以及 `connected=true`、`heartbeat_healthy=true`。重连或重启后重新核对编号。
-
-如 A* 尚未启动，从 `robot_project` 目录选用对应现场的地图包。将下面的地图编号和版本替换为实际值。
+按[真机接入](REAL_USAGE.zh-CN.md)创建 `mcp.real.local.toml` 并核对本体编号。启动 [A* MCP](MUJOCO_USAGE.zh-CN.md)，在真机配置中加入规划服务。地址按实际部署填写。
 
 ```bash
-cd /home/yanlinjie/robot_project
-ROBOT_MAP='地图ID/地图版本' bash a/scripts/run_robot_astar.sh start
+"$RPENT_VENV_DIR/bin/rpent" mcp add astar --url http://127.0.0.1:8790/mcp
 ```
+
+记录 A* 当前地图编号和版本，并核对测试地点。真机通信侧的连接和心跳有效后，再准备现场测试。
 
 ## 2. 实测坐标并查看规划
 
@@ -45,13 +25,13 @@ read -r -p '输入实测起点 x y yaw（米、米、弧度）：' START_X START
 read -r -p '输入实测目标 x y（米）：' GOAL_X GOAL_Y
 
 astar_args=(
-  --nav-endpoint "$RPENT_NAV_ENDPOINT"
+  --mcp-config "$RPENT_MCP_CONFIG"
   --map-id "$SITE_MAP" --map-version "$SITE_VERSION"
   --start "$START_X" "$START_Y" "$START_YAW"
   --goal "$GOAL_X" "$GOAL_Y"
 )
 
-../.venv/bin/python -m robots.unitree.real_astar_check "${astar_args[@]}"
+../.venv/bin/python -m robots.unitree.mcp.real.astar_check "${astar_args[@]}"
 ```
 
 核对 `plan.json` 的地图、起终点和 `legs[0].path`。本测试只执行**无告警、两个路径点、长度大于零且不超过 0.5 米**的规划。`check.json` 给出换算后的 `dx_m`、`dy_m` 和 `arrival_turn_deg`。它们使用本次起点的机身坐标，正 x 向前、正 y 向左。Go2 会先朝向目标再前进。
@@ -60,11 +40,10 @@ astar_args=(
 
 现场由一名操作员负责本体，确认控制器就绪、走行范围清空，并准备好手动停止方式。如果真机 runner 已启动，先等它空闲，再暂停这条任务入口，避免同时收到其他移动命令。[Go2 用户手册与遥控器说明](https://www.unitree.com/app/go2/)
 
-在同一终端，把 `1` 改为第 1 步核对的本体编号。追加 `--execute` 会重新向 A* 规划并展示将下发的动作。现场确认本体仍在填入的起点、朝向正确、路线与现场一致时，输入 `MOVE`。
+在同一终端追加 `--execute` 会重新向 A* 规划并展示将下发的动作。现场确认本体仍在填入的起点、朝向正确、路线与现场一致时，输入 `MOVE`。
 
 ```bash
-export RPENT_ROBOT_INDEX=1  # 改为核对过的实际编号
-../.venv/bin/python -m robots.unitree.real_astar_check "${astar_args[@]}" --execute
+../.venv/bin/python -m robots.unitree.mcp.real.astar_check "${astar_args[@]}" --execute
 ```
 
 程序只提交一条相对移动，并按服务端 `request_id` 查询结果。按 Ctrl+C 可请求中断，仍要核对本体是否停稳。网络或反馈异常时，以现场手动停止和实际状态为准。

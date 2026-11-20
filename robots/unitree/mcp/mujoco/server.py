@@ -19,11 +19,13 @@ from __future__ import annotations
 import argparse
 import math
 from contextlib import ExitStack
+from functools import partial
 from typing import Any
 
 from anyio import CancelScope, Lock, fail_after, sleep, to_thread
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
+from starlette.requests import Request
 
 from robots.unitree.http_client import ServiceError, finite_number, map_identity
 from robots.unitree.simulation_client import SimulationClient, validate_walk_arrival
@@ -48,11 +50,15 @@ async def _owned_status(simulation: SimulationClient, walk_id: str) -> dict[str,
     return status
 
 
-async def _wait_for_walk(simulation: SimulationClient, walk_id: str) -> dict[str, Any]:
+async def _wait_for_walk(
+    simulation: SimulationClient, walk_id: str, request: Request | None = None
+) -> dict[str, Any]:
     while True:
         status = await _owned_status(simulation, walk_id)
         if status["state"] == "finished":
             return status
+        if request is not None and await request.is_disconnected():
+            raise ServiceError(f"caller disconnected during walk {walk_id}")
         await sleep(0.2)
 
 
@@ -85,6 +91,14 @@ def create_mujoco_mcp(
     readonly = ToolAnnotations(readOnlyHint=True, destructiveHint=False)
     walk_lock = Lock()
     submitted: set[str] = set()
+    failed_previews: set[str] = set()
+
+    async def load_plan(plan_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
+        route = await to_thread.run_sync(_read_plan, planning, plan_id)
+        health = await to_thread.run_sync(simulation.health)
+        if map_identity(route) != map_identity(health):
+            raise ServiceError("saved plan uses a different map or map version")
+        return route, health
 
     @server.tool(annotations=readonly)
     async def get_pose() -> dict[str, Any]:
@@ -96,20 +110,43 @@ def create_mujoco_mcp(
         """Read the latest simulator walk and its execution evidence."""
         return await to_thread.run_sync(simulation.get_walk_status)
 
+    @server.tool(annotations=readonly)
+    async def preview_plan(plan_id: str) -> dict[str, Any]:
+        """Preview a saved A* plan in an independent simulation."""
+        async with walk_lock:
+            route, _ = await load_plan(plan_id)
+            failed_previews.add(plan_id)
+            result = await to_thread.run_sync(
+                partial(simulation.preview, route, timeout_s=walk_timeout_s)
+            )
+            preview = result.get("result")
+            if isinstance(preview, dict) and (
+                preview.get("ok") is False
+                or any(
+                    leg.get("reached") is False
+                    for leg in preview.get("legs", [])
+                    if isinstance(leg, dict)
+                )
+            ):
+                raise ServiceError("preview did not confirm arrival")
+            failed_previews.discard(plan_id)
+            return result
+
     @server.tool()
-    async def follow_plan(plan_id: str) -> dict[str, Any]:
+    async def follow_plan(plan_id: str, ctx: Context) -> dict[str, Any]:
         """Follow a plan_id returned by A* plan_route and wait for verified arrival."""
         if walk_lock.locked():
-            raise ServiceError("the simulation MCP service already owns a walk")
+            raise ServiceError("the simulation MCP service is already handling a plan")
         async with walk_lock:
             if plan_id in submitted:
                 raise ServiceError("plan was already submitted; query the walk status")
-            route = await to_thread.run_sync(_read_plan, planning, plan_id)
-            health = await to_thread.run_sync(simulation.health)
-            if map_identity(route) != map_identity(health):
-                raise ServiceError("saved plan uses a different map or map version")
+            if plan_id in failed_previews:
+                raise ServiceError("plan preview failed; replan before walking")
+            route, health = await load_plan(plan_id)
             if (
                 not health["simulator_running"]
+                or health.get("control_mode", "idle") != "idle"
+                or health.get("other_controllers")
                 or (health.get("walk") or {}).get("state") == "running"
             ):
                 raise ServiceError("simulator is unavailable or busy")
@@ -133,7 +170,12 @@ def create_mujoco_mcp(
                     walk_id = accepted["walk_id"]
                 try:
                     with fail_after(walk_timeout_s):
-                        status = await _wait_for_walk(simulation, walk_id)
+                        request = ctx.request_context.request
+                        status = await _wait_for_walk(
+                            simulation,
+                            walk_id,
+                            request if isinstance(request, Request) else None,
+                        )
                 except TimeoutError as exc:
                     raise ServiceError(
                         f"walk {walk_id} did not finish within {walk_timeout_s:g} seconds"

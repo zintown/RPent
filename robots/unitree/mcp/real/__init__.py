@@ -12,10 +12,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Compatibility entry point for A* route planning."""
-
-from robots.unitree.mcp.astar.server import create_astar_mcp as create_astar_mcp
-from robots.unitree.mcp.astar.server import main as main
-
-if __name__ == "__main__":
-    main()
+"""Physical Go2 MCP service."""

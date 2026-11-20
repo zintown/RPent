@@ -47,6 +47,8 @@ if sys.argv[1] == "-c":
     os.execv(sys.executable, [sys.executable, *sys.argv[1:]])
 if "LAUNCH_TEST_EXPECTED_KEY" in os.environ:
     assert os.environ.get("OPENAI_API_KEY") == os.environ["LAUNCH_TEST_EXPECTED_KEY"], "config key was not exported"
+out = sys.argv[sys.argv.index("--output-dir") + 1]
+assert Path(os.environ["RPENT_TASK_OUTPUT_DIR"]) == Path(out).resolve()
 Path(os.environ["LAUNCH_TEST_ARGS"]).write_text(json.dumps(sys.argv[1:]))
 """
         )
@@ -56,9 +58,9 @@ Path(os.environ["LAUNCH_TEST_ARGS"]).write_text(json.dumps(sys.argv[1:]))
         self.env = os.environ.copy()
         self.env.pop("OPENAI_API_KEY", None)
         self.env.pop("LAUNCH_TEST_EXPECTED_KEY", None)
+        self.env.pop("RPENT_MCP_CONFIG", None)
         self.env.update(
             RPENT_CONFIG_FILE=str(self.config),
-            RPENT_UNITREE_MODE="mujoco",
             RPENT_VENV_DIR=str(venv),
             RPENT_RUNS_DIR=str(self.root / "logs"),
             LAUNCH_TEST_ARGS=str(self.root / "args.json"),
@@ -102,24 +104,15 @@ Path(os.environ["LAUNCH_TEST_ARGS"]).write_text(json.dumps(sys.argv[1:]))
         parsed, _ = parser.parse_known_args(args[2:])
         self.assertEqual(parsed.task, "--max-turns 999 这是任务文本")
 
-    def test_real_mode_passes_only_its_own_service_configuration(self):
-        self.env.update(
-            RPENT_UNITREE_MODE="real",
-            RPENT_REAL_ENDPOINT="http://robot-gateway.test:9001",
-            RPENT_ROBOT_INDEX="2",
-            RPENT_VLN_ENDPOINT="ws://simulation-only.test:8050",
-        )
+    def test_custom_mcp_config_is_passed_to_the_cli(self):
+        config_path = self.root / "real services.toml"
+        self.env["RPENT_MCP_CONFIG"] = str(config_path)
         result = self.launch("go2-status", "查询在线状态")
         self.assertEqual(result.returncode, 0, result.stderr)
         args = json.loads((self.root / "args.json").read_text())
-        self.assertEqual(args[args.index("--unitree-mode") + 1], "real")
-        self.assertEqual(args[args.index("--robot-index") + 1], "2")
-        self.assertEqual(
-            args[args.index("--real-endpoint") + 1], "http://robot-gateway.test:9001"
-        )
-        self.assertFalse(
-            any(arg.startswith(("--sim-", "--nav-", "--vln-")) for arg in args)
-        )
+        self.assertEqual(args[args.index("--mcp-config") + 1], str(config_path))
+        self.assertNotIn("--unitree-mode", args)
+        self.assertNotIn("--real-endpoint", args)
 
     def test_missing_arguments_fail_before_launch(self):
         self.assertEqual(self.launch("task-only").returncode, 2)
@@ -149,10 +142,7 @@ Path(os.environ["LAUNCH_TEST_ARGS"]).write_text(json.dumps(sys.argv[1:]))
         script = repo / "run_rpent.sh"
         script.write_bytes((REPO / "run_rpent.sh").read_bytes())
         key = "test-only-key-in-repository-config"
-        (repo / ".env.local").write_text(
-            f"export OPENAI_API_KEY='{key}'\n"
-            "export RPENT_NAV_ENDPOINT='http://navigation-from-config.test'\n"
-        )
+        (repo / ".env.local").write_text(f"export OPENAI_API_KEY='{key}'\n")
         self.env.pop("RPENT_CONFIG_FILE")
         self.env["LAUNCH_TEST_EXPECTED_KEY"] = key
         result = self.launch("task-123", "去广告牌", script=script)
@@ -160,8 +150,8 @@ Path(os.environ["LAUNCH_TEST_ARGS"]).write_text(json.dumps(sys.argv[1:]))
         self.assertNotIn(key, result.stdout + result.stderr)
         args = json.loads((self.root / "args.json").read_text())
         self.assertEqual(
-            args[args.index("--nav-endpoint") + 1],
-            "http://navigation-from-config.test",
+            args[args.index("--mcp-config") + 1],
+            str(repo / "mcp.toml"),
         )
 
     def test_missing_explicit_config_fails_before_launch(self):

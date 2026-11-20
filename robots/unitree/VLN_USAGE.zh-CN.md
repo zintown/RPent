@@ -1,6 +1,6 @@
 # 在现有 Go2 仿真中运行 LightNav VLN
 
-LightNav 根据第一视角图像和文字指令预测局部航点。RPent 工具内部持续取图、
+LightNav 根据第一视角图像和文字指令预测局部航点。VLN MCP 服务内部持续取图、
 推理并转发航点，由现有 Go2 仿真服务完成坐标转换、MPC 和步态控制。
 A* 继续负责地图路径规划；同一台 Go2 每次只执行一种导航方式。
 
@@ -26,7 +26,7 @@ uv pip install --offline --no-deps --no-build-isolation --python .venv/bin/pytho
 uv pip check --python .venv/bin/python
 ```
 
-RPent 客户端只需要 HTTP 和 WebSocket；`unitree-vln` extra 声明其可选 WebSocket
+LightNav 转接程序使用 HTTP 和 WebSocket。`unitree-vln` extra 声明其可选 WebSocket
 依赖。模型加载和 GPU 运算只发生在独立的 LightNav 服务进程。
 
 ## 启动与停止模型
@@ -45,7 +45,7 @@ RPent 客户端只需要 HTTP 和 WebSocket；`unitree-vln` extra 声明其可�
 
 可在启动前设置 `VLN_CUDA_VISIBLE_DEVICES`、`VLN_MODEL_PATH`、`VLN_PORT` 和
 `VLN_GPU_MEMORY_UTILIZATION`；默认显存比例为 0.4。选择其他端口时，状态检查及
-RPent 的 `--vln-endpoint` 也要使用相同配置。停止命令只结束本启动器记录的模型进程：
+VLN MCP 的 `--vln-endpoint` 也要使用相同配置。停止命令只结束本启动器记录的模型进程：
 
 ```bash
 .venv/bin/python lightnav/scripts/run_vln_service.py stop
@@ -54,54 +54,31 @@ RPent 的 `--vln-endpoint` 也要使用相同配置。停止命令只结束本�
 仿真、A* 和 RPent 使用各自原有启停入口。模型服务关闭时，活动 VLN 工具会尝试
 确认停车；不能确认时保留待核对状态，禁止自动重放运动。
 
-## 通过 DSH 下发 VLN 任务
+## 注册 LightNav MCP
 
-本机配置片段读取私有 `.env.local`，设置 `mujoco` 模式及 LightNav、观测和仿真地址。在 RPent 机器上执行。
+先启动 [A* 和 MuJoCo MCP](MUJOCO_USAGE.zh-CN.md)。首次配置时在 RPent 仓库根目录执行下列命令。示例使用默认 LightNav、观测与仿真地址。
 
 ```bash
-cd /home/yanlinjie/robot_project/rpent
-set -a
-source robots/unitree/vln_local.env
-set +a
-../.venv/bin/python -m robots.unitree.mcp.task.server \
-  --host 127.0.0.1 --port 8780 --robot-id go2-01 \
-  --jobs-dir output/vln-integration/jobs
+export RPENT_VENV_DIR="$(cd .. && pwd)/.venv"
+export RPENT_MCP_CONFIG="$PWD/mcp.vln.local.toml"
+export RPENT_RUNS_DIR="$PWD/output/vln-integration/runs"
+cp -n mcp.toml "$RPENT_MCP_CONFIG"
+
+"$RPENT_VENV_DIR/bin/rpent" mcp add vln \
+  --tool-timeout-sec 150 --env-from RPENT_TASK_OUTPUT_DIR \
+  -- "$RPENT_VENV_DIR/bin/python" -m robots.unitree.mcp.vln.server
 ```
 
-上例为本机监听。DSH 部署在另一台服务器时，按 [任务 MCP 服务](TASK_MCP.zh-CN.md)设置 RPent 的监听地址、可信 Host 和令牌。前台进程用 Ctrl+C 退出，退出前清理其拥有的任务和控制。
+底层地址变化时，在配置的启动参数中设置 `--vln-endpoint`、`--observation-endpoint` 或 `--sim-endpoint`。`--vln-timeout-s` 默认 120 秒，`--vln-inference-timeout-s` 默认 3 秒。MCP 的 `tool_timeout_sec` 应留出 episode 结束后的停车与清理时间。
 
-DSH 可以提交“使用 VLN 保持当前地图位置并确认停车”。RPent 读取当前位置，将它作为已知验收坐标，再调用 VLN。DSH 可通过同一 MCP 服务查询结果或请求停止。
-
-默认调度先解析目标区域、物体和验收条件：已知地图站位使用 A*；
-“前往某个房间寻找物体”拆成 A* 到房间、确认停车、VLN 局部搜索两个阶段。
-例如“前往客厅找垃圾桶”先解析实时表中的完整名称“客厅”，再执行视觉搜索。
-完整名称的唯一匹配优先于其他名称的部分匹配；客厅东区和客厅西区不会使
-一个已有唯一完整名称的“客厅”变成歧义。确实无法解析区域时报告缺少信息。
-
-明确要求“仅使用 VLN”时保留完整视觉路线；明确要求“仅使用 A*”时不会增加
-视觉搜索。
-传给 LightNav 的是当前 VLN 阶段的指令，省略已经完成的区域导航。
-局部搜索通常先给 30 秒，且不超过配置的单次 VLN 上限；一次失败后不重复
-提交同一阶段，也不切换算法绕过失败状态。
-
-这些规则由 `prompt_bundle.py` 的 MuJoCo system prompt 提供。
-每条新任务会启动新的 RPent 子进程并读取提示词，修改后对新任务生效；
-正在运行的任务仍使用原提示词，8780 任务服务无需为此重启。
-本地配置同时设置单段 A* 预算 300 秒、整任务规划预算 900 秒、最多 16 次模型请求；
-这些值由每个新任务的启动脚本重新读取。VLN 单次最大预算仍为 120 秒。
-房间边界监控和视觉目标的独立验收仍需要工具层支持；提示词中的局部搜索要求
-不能保证机器人始终留在指定房间，地图站位验收也不能代替视觉识别证据。
-
-也可在终端直接测试。RPent CLI 在 `--unitree-mode mujoco` 上增加以下参数。
-
-```text
---vln-endpoint ws://127.0.0.1:8050
---observation-endpoint http://127.0.0.1:8771
---vln-timeout-s 120
---vln-inference-timeout-s 3
+```bash
+bash run_rpent.sh "vln-$(date -u +%Y%m%dT%H%M%SZ)" \
+  '使用 VLN 保持当前地图位置并确认停车。先读取当前位置作为验收坐标。'
 ```
 
-两个 endpoint 必须成对提供。省略时保留原 A* 工具集。
+通过 DSH 提交时，用上述 `RPENT_MCP_CONFIG` 启动 [RPent 任务 MCP](TASK_MCP.zh-CN.md)。启动脚本为每条任务设置 `RPENT_TASK_OUTPUT_DIR`，供 stdio 服务写入执行记录。
+
+已知坐标或地点可用 A* 到达。「前往客厅找垃圾桶」可以先用 A* 到已解析的客厅站位，停稳后再用 VLN 局部搜索。优先采用唯一的完整点位名称。明确指定仅用 A* 或仅用 VLN 时遵循该要求。局部搜索通常使用约 30 秒的预算，视觉指令只包含当前搜索阶段。房间范围与物体识别结果由实际观测验收。
 
 ## 工具和闭环
 
@@ -160,7 +137,7 @@ DSH 可以提交“使用 VLN 保持当前地图位置并确认停车”。RPent
 `tracking`、`waiting_fresh_prediction`、`stopping`、`finished`、
 `verification_required`、`cancelled` 或 `failed`。`finished` 表示已知目标验收
 及停车均通过。`control` 内有仿真步态、MPC 和实测运动反馈；`latest_frame` 是
-本地诊断文件路径，浏览器实时画面仍使用 8771 的第一视角接口。
+本地诊断文件路径，第一视角画面可通过 8771 的观测接口查看。
 
 已停车但目标未验证时，任务终态为 `verification_required`。DSH 请求停止后继续查询，确认任务终态和 `stop_confirmed`。控制权或停车状态不明时，任务终态为 `requires_attention`，runner 等待核对后再接收新任务。
 
@@ -174,7 +151,7 @@ cd /home/yanlinjie/robot_project/rpent
 ```
 
 实际联调需要已经启动的 A*、Go2 和 LightNav，且仿真与现有 RPent 任务均空闲。
-以下检查通过任务 MCP 控制仿真 Go2。
+以下检查通过任务 MCP 和 VLN MCP 控制仿真 Go2。
 
 ```bash
 RPENT_RUN_UNITREE_VLN=1 ../.venv/bin/python -m pytest \

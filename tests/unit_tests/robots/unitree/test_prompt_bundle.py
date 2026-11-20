@@ -12,37 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Keep rendered navigation guidance aligned with configured capabilities."""
-
-import pytest
+"""Check the Unitree planner receives one MCP-oriented prompt."""
 
 from robots.unitree.robot_spec import get_robot_spec
 
 
-@pytest.mark.parametrize("visual", [False, True])
-def test_prompt_exposes_only_configured_navigation_tools(visual):
-    variables = {"unitree_mode": "mujoco"}
-    if visual:
-        variables["vln_endpoint"] = "ws://vln.test"
-    prompt = get_robot_spec().prompts.render("system", variables=variables)
-    assert "plan_navigation" in prompt and "follow_navigation" in prompt
-    for name in ("run_vln_navigation", "get_vln_status", "stop_vln_navigation"):
-        assert (name in prompt) is visual
-    assert "dis_move" not in prompt
-    assert "Every task must end with the finish tool" in prompt
-
-
-@pytest.mark.parametrize("limit,local", [(12.5, "12.5"), (120.0, "30")])
-def test_prompt_search_budget_respects_the_configured_vln_limit(limit, local):
-    prompt = get_robot_spec().prompts.render(
-        "system",
-        variables={
-            "unitree_mode": "mujoco",
-            "vln_endpoint": "ws://vln.test",
-            "navigation_timeout_s": 87.5,
-            "vln_timeout_s": limit,
-        },
-    )
-    assert "configured timeout of 87.5 seconds" in prompt
-    assert f"normally {local} seconds" in prompt
-    assert f"configured VLN maximum is {limit} seconds" in prompt
+def test_prompt_guides_map_visual_and_physical_mcp_tools():
+    prompts = get_robot_spec().prompts
+    system = prompts.render("system", variables={})
+    for name in ("plan_route", "follow_plan", "run_vln_navigation", "move_relative"):
+        assert name in system
+    assert "verification_required" in system
+    assert "body-frame" in system
+    user = prompts.render("user", variables={"task": "前往客厅"})
+    assert "前往客厅" in user

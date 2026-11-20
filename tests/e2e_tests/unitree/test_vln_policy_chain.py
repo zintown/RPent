@@ -17,9 +17,11 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import shlex
 import socket
+import sys
 import threading
 import time
 from contextlib import closing, contextmanager
@@ -78,7 +80,6 @@ def task_api(jobs):
 def run_case(monkeypatch, *, cancel):
     """Exercise real inference, capture alignment, task status and bounded stopping."""
     sim = "http://127.0.0.1:8770"
-    nav = "http://127.0.0.1:8765"
     observation = "http://127.0.0.1:8771"
     model = os.environ.get("RPENT_UNITREE_VLN_ENDPOINT", "ws://127.0.0.1:8050")
     output = Path(
@@ -104,7 +105,7 @@ def run_case(monkeypatch, *, cancel):
         if not cancel:
             action["expected_goal"] = goal
         script = (
-            ScriptedToolCall("run_vln_navigation", action),
+            ScriptedToolCall("mcp__vln__run_vln_navigation", action),
             ScriptedToolCall(
                 "finish",
                 {
@@ -113,21 +114,26 @@ def run_case(monkeypatch, *, cancel):
                 },
             ),
         )
+        config_path = output / "mcp.toml"
+        config_path.write_text(
+            "[mcp_servers.vln]\n"
+            'transport = "stdio"\n'
+            f"command = {json.dumps(sys.executable)}\n"
+            f"cwd = {json.dumps(str(REPO))}\n"
+            'env_from = ["RPENT_TASK_OUTPUT_DIR"]\n'
+            "tool_timeout_sec = 60\n"
+            f"args = {json.dumps(['-m', 'robots.unitree.mcp.vln.server', '--sim-endpoint', sim, '--observation-endpoint', observation, '--vln-endpoint', model, '--vln-timeout-s', '40'])}\n"
+        )
         samples = []
         with OfflinePlannerServer(script) as planner:
             config = {
                 "RPENT_VENV_DIR": str(PROJECT / ".venv"),
-                "RPENT_NAV_ENDPOINT": nav,
-                "RPENT_SIM_ENDPOINT": sim,
-                "RPENT_VLN_ENDPOINT": model,
-                "RPENT_OBSERVATION_ENDPOINT": observation,
+                "RPENT_MCP_CONFIG": str(config_path),
                 "RPENT_RUNS_DIR": str(output / "runs"),
                 "RPENT_MODEL": f"openai-chat:{OFFLINE_MODEL_NAME}",
                 "RPENT_MEMORY_DIR": str(output / "memory"),
                 "RPENT_MAX_TURNS": "5",
                 "RPENT_PLANNER_TIMEOUT_S": "90",
-                "RPENT_VLN_TIMEOUT_S": "40",
-                "RPENT_VLN_INFERENCE_TIMEOUT_S": "3",
                 "OPENAI_API_KEY": OFFLINE_MODEL_NAME,
                 "OPENAI_BASE_URL": planner.base_url,
                 "NO_PROXY": "127.0.0.1,localhost",
@@ -143,7 +149,6 @@ def run_case(monkeypatch, *, cancel):
             )
             config_path.chmod(0o600)
             monkeypatch.setenv("RPENT_CONFIG_FILE", str(config_path))
-            monkeypatch.setenv("RPENT_UNITREE_MODE", "mujoco")
             with task_api(output / "jobs") as (endpoint, client):
 
                 def call(name, **arguments):
@@ -164,7 +169,14 @@ def run_case(monkeypatch, *, cancel):
                     while time.monotonic() < deadline:
                         job = call("get_robot_task", **identity)
                         vln = (job.get("navigation") or {}).get("vln") or {}
-                        applied = (vln.get("control") or {}).get("applied") or {}
+                        pose = vln.get("pose") or origin
+                        yaw_delta = pose["yaw"] - origin["yaw"]
+                        moved = (
+                            math.hypot(pose["x"] - origin["x"], pose["y"] - origin["y"])
+                            > 0.02
+                            or abs(math.atan2(math.sin(yaw_delta), math.cos(yaw_delta)))
+                            > 0.02
+                        )
                         samples.append(
                             {
                                 "time": time.time(),
@@ -172,17 +184,15 @@ def run_case(monkeypatch, *, cancel):
                                 "vln_state": vln.get("state"),
                                 "predictions": vln.get("predictions"),
                                 "active_control_id": vln.get("active_control_id"),
-                                "applied": applied,
+                                "pose": pose,
                             }
                         )
                         if (
                             cancel
                             and not requested_stop
                             and vln.get("predictions", 0) >= 5
-                            and max(
-                                abs(applied.get("vx", 0)), abs(applied.get("wz", 0))
-                            )
-                            > 0.02
+                            and vln.get("active_control_id")
+                            and moved
                         ):
                             call("stop_robot_task", **identity)
                             requested_stop = True

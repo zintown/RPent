@@ -27,11 +27,14 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from robots.unitree.http_client import ServiceError, finite_number, map_identity
-from robots.unitree.observation_client import ObservationClient
+from robots.unitree.mcp.vln.model_client import VlnClient
+from robots.unitree.mcp.vln.observation_client import ObservationClient
 from robots.unitree.simulation_client import SimulationClient, validate_pose
-from robots.unitree.vln_client import VlnClient
 from rpent.evaluation import write_json_atomic
-from rpent.tools.toolkit import ToolCancelled
+
+
+class VlnCancelled(ServiceError):
+    """The caller cancelled the active visual navigation episode."""
 
 
 class VlnNavigation:
@@ -92,7 +95,7 @@ class VlnNavigation:
 
     def _check_cancelled(self, check_cancelled: Callable[[], None]) -> None:
         if self._cancelled.is_set():
-            raise ToolCancelled("VLN navigation was cancelled")
+            raise VlnCancelled("VLN navigation was cancelled")
         check_cancelled()
 
     def _stop_owned(self) -> dict[str, Any] | None:
@@ -417,12 +420,12 @@ class VlnNavigation:
                     **{k: v for k, v in errors.items() if k != "goal_verified"},
                 )
             except BaseException as exc:
-                cancelled = isinstance(exc, ToolCancelled) or self._cancelled.is_set()
+                cancelled = isinstance(exc, VlnCancelled) or self._cancelled.is_set()
                 self._publish(
                     state="cancelled" if cancelled else "failed", error=str(exc)
                 )
-                if cancelled and not isinstance(exc, ToolCancelled):
-                    raise ToolCancelled("VLN navigation was cancelled") from exc
+                if cancelled and not isinstance(exc, VlnCancelled):
+                    raise VlnCancelled("VLN navigation was cancelled") from exc
                 raise
             finally:
                 try:

@@ -27,12 +27,10 @@ RPent 通过 A* MCP 查询点位和规划路径，再把 `plan_id` 交给 MuJoCo
 
 ```bash
 export RPENT_VENV_DIR="$(cd .. && pwd)/.venv"
-export RPENT_UNITREE_MODE=mcp
-export RPENT_MCP_CONFIG="$PWD/mcp.toml"
 bash run_rpent.sh "mcp-$(date -u +%Y%m%dT%H%M%SZ)" '前往厕所通道并确认到达'
 ```
 
-直接运行 CLI 时可用 `--unitree-mode mcp --mcp-config "$PWD/mcp.toml"`。DSH 通过 [RPent 任务 MCP](TASK_MCP.zh-CN.md)提交任务。为 RPent 增加其他 MCP 服务时，可在配置中加入对应的 `[mcp_servers.<服务名>]`，详见[规划器配置](../../docs/source-zh/rst_source/guides/configure_planner.rst)。
+直接运行 CLI 时可用 `--mcp-config "$PWD/mcp.toml"`。DSH 通过 [RPent 任务 MCP](TASK_MCP.zh-CN.md)提交任务。为 RPent 增加其他 MCP 服务时，可在配置中加入对应的 `[mcp_servers.<服务名>]`，详见[规划器配置](../../docs/source-zh/rst_source/guides/configure_planner.rst)。
 
 | 服务能力 | 输入与结果 |
 | --- | --- |
@@ -44,6 +42,8 @@ bash run_rpent.sh "mcp-$(date -u +%Y%m%dT%H%M%SZ)" '前往厕所通道并确认�
 | MuJoCo `get_walk_status` | 返回当前或最近一次行走的状态。 |
 
 `legs[].path` 是每段路径的完整 `[x,y]` 点列，`legs[].headings` 对应相邻点之间的方向。位置为米，角度为弧度。每个目标从实时位姿重新规划。服务重启后也需重新规划。
+
+新版 MuJoCo MCP 还提供 `preview_plan`。在 `enabled_tools` 中加入该工具即可预演单目标路线。预演失败的计划需重新规划。
 
 ## 验收和排查
 
@@ -60,9 +60,9 @@ curl --noproxy '*' -fsS http://127.0.0.1:8770/walk
 
 地图不一致或机器人摔倒时先处理仿真状态。动作回执丢失时，先查行走编号和原执行状态，再决定是否启动下一次任务。
 
-## LightNav 和直接 HTTP 仿真
+## 联合 LightNav 和检查底层服务
 
-LightNav 使用 `mujoco` 模式，启动方式见 [LightNav 接入](VLN_USAGE.zh-CN.md)。`scripts/test_rpent_local.sh` 可检查 RPent 到 A* 和 MuJoCo 的直接 HTTP 仿真链路。
+在仿真配置中加入 LightNav 可执行地图导航和视觉搜索，见 [LightNav 接入](VLN_USAGE.zh-CN.md)。
 
 需要检查 HTTP 端点和启动仿真器时，在当前 Bash 终端设置 `RPENT_NAV_ENDPOINT` 和 `RPENT_SIM_ENDPOINT` 后执行准备脚本。
 

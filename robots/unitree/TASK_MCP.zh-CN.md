@@ -1,6 +1,6 @@
 # RPent 任务 MCP 服务
 
-每个 RPent runner 为一个机器人接收完整任务，调用本机配置的仿真或真机服务，并记录执行结果。DSH 在中控服务器运行，通过网络调用 RPent 的 `/mcp/`。
+每个 RPent runner 为一个机器人接收完整任务，通过 MCP 配置发现服务，并记录执行结果。DSH 在中控服务器运行，通过网络调用 RPent 的 `/mcp/`。
 
 ## 在 RPent 机器上启动
 
@@ -12,7 +12,6 @@ source .env.local
 set +a
 
 export RPENT_VENV_DIR="$(cd .. && pwd)/.venv"
-export RPENT_UNITREE_MODE=mcp
 export RPENT_MCP_CONFIG="$PWD/mcp.toml"
 
 "$RPENT_VENV_DIR/bin/python" -m robots.unitree.mcp.task.server \
@@ -22,7 +21,7 @@ export RPENT_MCP_CONFIG="$PWD/mcp.toml"
   --jobs-dir output/task-mcp/jobs
 ```
 
-此例使用 [MCP 仿真配置](MUJOCO_USAGE.zh-CN.md)。使用 LightNav 或连接真机时，选择对应的 [LightNav 配置](VLN_USAGE.zh-CN.md)或[真机配置](REAL_USAGE.zh-CN.md)。DSH 提供任务 ID，RPent 将记录保存到 `--jobs-dir`。沿用原目录可继续查询历史任务。
+此例使用 [MCP 仿真配置](MUJOCO_USAGE.zh-CN.md)。使用 LightNav 或连接真机时，将 `RPENT_MCP_CONFIG` 指向对应的 [LightNav 配置](VLN_USAGE.zh-CN.md)或[真机配置](REAL_USAGE.zh-CN.md)。DSH 提供任务 ID，RPent 将记录保存到 `--jobs-dir`。沿用原目录可继续查询历史任务。
 
 中控连接 `http://go2-01.lan:8780/mcp/`，并通过 `Authorization: Bearer <令牌>` 传递对应的 runner 令牌。使用 IP 访问时，将其连同端口填入 `--mcp-allowed-host`。如需支持两种地址，可重复指定此参数。`GET /healthz` 检查 runner 状态。
 

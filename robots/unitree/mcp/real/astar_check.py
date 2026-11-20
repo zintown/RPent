@@ -13,26 +13,16 @@ import json
 import math
 import os
 import sys
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from robots.unitree.http_client import (
-    ServiceError,
-    finite_number,
-    map_identity,
-    validate_endpoint,
-)
-from robots.unitree.navigation_client import CoordinateGoal, NavigationClient
-from robots.unitree.real_client import (
-    RealRobotClient,
-    relative_command,
-    validate_robot_index,
-)
-from robots.unitree.real_toolkit import RealRobotToolkit
-from rpent.dashboard.events import NullDashboardEventSink
+from robots.unitree.http_client import ServiceError, finite_number, map_identity
+from robots.unitree.mcp.real.client import relative_command
+from robots.unitree.navigation_client import CoordinateGoal
 from rpent.evaluation import write_json_atomic
-from rpent.memory import MemoryManager
+from rpent.tools.mcp_client import McpClient, McpServiceError, load_mcp_servers
 
 _MAX_CHECK_DISTANCE_M = 0.5
 _ENDPOINT_TOLERANCE_M = 0.01  # The A* API rounds returned path coordinates.
@@ -70,37 +60,23 @@ def short_move(
     return relative_command(forward, left, 0)["payload"]
 
 
-def _execute(
-    endpoint: str,
-    robot_index: int,
-    move: dict[str, float],
-    output_dir: Path,
-    timeout_s: float,
-) -> dict[str, Any]:
-    client = RealRobotClient(endpoint, robot_index=robot_index)
-    try:
-        toolkit = RealRobotToolkit(
-            real=client,
-            dashboard_events=NullDashboardEventSink(),
-            memory=MemoryManager(output_dir / "memory"),
-            state_output_dir=output_dir,
-            action_timeout_s=timeout_s,
-        )
-    except Exception:
-        client.close()
-        raise
-    try:
-        return toolkit.execute_tool("move_relative", move).data
-    finally:
-        toolkit.close()
+def _call(client: McpClient, tool: str, **arguments: Any) -> dict[str, Any]:
+    result = client.call_tool(tool, arguments)
+    if result.isError:
+        detail = next((part.text for part in result.content if part.type == "text"), "")
+        raise ServiceError(f"{client.name}/{tool}: {detail}")
+    if not isinstance(result.structuredContent, dict):
+        raise ServiceError(f"{client.name}/{tool} did not return a structured result")
+    return result.structuredContent
 
 
 def main(argv: list[str] | None = None) -> int:
     """Plan first and execute one relative command only on site confirmation."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--nav-endpoint",
-        default=os.environ.get("RPENT_NAV_ENDPOINT", "http://127.0.0.1:8765"),
+        "--mcp-config",
+        type=Path,
+        default=Path(os.environ.get("RPENT_MCP_CONFIG") or "mcp.toml"),
     )
     parser.add_argument("--map-id", required=True)
     parser.add_argument("--map-version", required=True)
@@ -116,27 +92,15 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Confirm and send the displayed move via the Go2 service.",
     )
-    parser.add_argument(
-        "--real-endpoint", default=os.environ.get("RPENT_REAL_ENDPOINT")
-    )
-    parser.add_argument(
-        "--robot-index", type=int, default=os.environ.get("RPENT_ROBOT_INDEX")
-    )
-    parser.add_argument("--action-timeout-s", type=float, default=60.0)
     args = parser.parse_args(argv)
 
     try:
-        if args.execute:
-            if not args.real_endpoint or args.robot_index is None:
-                raise ValueError("--execute requires --real-endpoint and --robot-index")
-            validate_endpoint(args.real_endpoint)
-            validate_robot_index(args.robot_index)
-            if args.real_endpoint.rstrip("/").endswith("/call"):
-                raise ValueError("--real-endpoint is a base URL; omit /call")
-            if not math.isfinite(args.action_timeout_s) or args.action_timeout_s <= 0:
-                raise ValueError("--action-timeout-s must be finite and positive")
-            if not sys.stdin.isatty():
-                raise ValueError("--execute requires an on-site operator at a terminal")
+        if args.execute and not sys.stdin.isatty():
+            raise ValueError("--execute requires an on-site operator at a terminal")
+        servers = load_mcp_servers(args.mcp_config)
+        for name in ("astar", "real") if args.execute else ("astar",):
+            if name not in servers or not servers[name].enabled:
+                raise ValueError(f"enable the {name!r} MCP service in --mcp-config")
         start = {
             key: finite_number(value, f"start.{key}")
             for key, value in zip(("x", "y", "yaw"), args.start, strict=True)
@@ -150,17 +114,17 @@ def main(argv: list[str] | None = None) -> int:
         )
         output_dir = output_dir.resolve()
 
-        nav = NavigationClient(args.nav_endpoint)
-        try:
-            if map_identity(nav.health()) != identity:
+        with closing(McpClient("astar", servers["astar"])) as nav:
+            if map_identity(_call(nav, "list_waypoints")) != identity:
                 raise ServiceError(
                     "the A* map identity does not match the measured start"
                 )
-            plan = nav.plan(start, [goal])
+            route = _call(
+                nav, "plan_route", start=start, goal=goal.model_dump(exclude_none=True)
+            )
+            plan = _call(nav, "get_plan", plan_id=route["plan_id"])
             if map_identity(plan) != identity:
                 raise ServiceError("the A* map changed during planning")
-        finally:
-            nav.close()
         output_dir.mkdir(parents=True, exist_ok=False)
         plan_path = write_json_atomic(output_dir / "plan.json", plan)
         print(f"A* plan: {plan_path}", flush=True)
@@ -178,27 +142,24 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(check, ensure_ascii=False, indent=2), flush=True)
         if not args.execute:
             return 0
-        confirmation = input(
-            f"确认 {args.real_endpoint} 的本体编号 {args.robot_index} 位于上述实测起点与朝向、"
-            "现场路径清空且操作员可以手动停止后，输入 MOVE 执行一次："
-        )
-        if confirmation.strip() != "MOVE":
-            print("已取消执行。")
-            return 2
-        result = _execute(
-            args.real_endpoint,
-            args.robot_index,
-            move,
-            output_dir,
-            args.action_timeout_s,
-        )
+        os.environ["RPENT_TASK_OUTPUT_DIR"] = str(output_dir)
+        with closing(McpClient("real", servers["real"])) as real:
+            robot = _call(real, "get_robot_status")
+            confirmation = input(
+                f"确认本体编号 {robot['robot_index']} 位于上述实测起点与朝向、"
+                "现场路径清空且操作员可以手动停止后，输入 MOVE 执行一次："
+            )
+            if confirmation.strip() != "MOVE":
+                print("已取消执行。")
+                return 2
+            result = _call(real, "move_relative", **move)
         write_json_atomic(output_dir / "execution.json", result)
         print(json.dumps(result, ensure_ascii=False, indent=2))
-        return 1 if result.get("error") else 0
+        return 0
     except KeyboardInterrupt:
         print("已中断。请核对现场停车和 real/latest.json。", file=sys.stderr)
         return 130
-    except (EOFError, OSError, ValueError, ServiceError) as exc:
+    except (EOFError, OSError, ValueError, ServiceError, McpServiceError) as exc:
         print(f"真机 A* 测试失败：{exc}", file=sys.stderr)
         return 1
 

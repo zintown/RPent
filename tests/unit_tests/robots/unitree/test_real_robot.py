@@ -11,6 +11,7 @@ import json
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from uuid import uuid4
 
@@ -18,10 +19,8 @@ import httpx
 import pytest
 from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 
-from robots.unitree.real_client import RealRobotClient
-from robots.unitree.real_toolkit import RealRobotToolkit
-from rpent.dashboard.events import NullDashboardEventSink
-from rpent.memory import MemoryManager
+from rpent.tools.mcp_client import McpClient, McpServerConfig
+from rpent.tools.toolkit import ToolCancelled
 
 MOVE = {"dx_m": 0.3, "dy_m": -0.1, "arrival_turn_deg": 30}
 
@@ -163,116 +162,22 @@ class CommunicationService:
 
 
 @pytest.fixture
-def communication(monkeypatch):
-    monkeypatch.setattr("robots.unitree.real_toolkit._POLL_INTERVAL_S", 0.01)
+def communication():
     return CommunicationService()
 
 
 @pytest.fixture
-def toolkit(tmp_path, communication):
-    def send(request):
-        assert request.url.path == "/call"
-        assert request.method == "POST"
-        return httpx.Response(
-            200, json=communication.handle(json.loads(request.content))
-        )
-
-    with httpx.Client(transport=httpx.MockTransport(send)) as http:
-        client = RealRobotClient("http://real.test:9001", robot_index=1, client=http)
-        tools = RealRobotToolkit(
-            real=client,
-            dashboard_events=NullDashboardEventSink(),
-            memory=MemoryManager(tmp_path / "memory"),
-            state_output_dir=tmp_path / "run",
-            action_timeout_s=2,
-        )
-        try:
-            yield tools
-        finally:
-            tools.close()
-
-
-def test_failed_submission_with_server_id_is_reconciled_without_replay(
-    toolkit, communication
-):
-    communication.mode = "rejected"
-    result = toolkit.execute_tool("move_relative", MOVE).data
-    assert result["status"] == "rejected" and result["error"]
-    assert result["request_id"] != result["client_request_id"]
-    assert communication.methods == [
-        "healthz",
-        "env.execute_command",
-        "env.get_request",
-    ]
-    assert toolkit.execute_tool(
-        "finish", {"status": "success", "summary": "done"}
-    ).is_error
-
-
-def test_lost_move_acknowledgement_blocks_new_motion(toolkit, communication):
-    communication.mode = "lost_ack"
-    assert toolkit.execute_tool("move_relative", MOVE).is_error
-    assert toolkit.execute_tool("move_relative", MOVE).is_error
-    state = toolkit.state.get().state
-    assert state["submission_uncertain"] and state["stop_error"]
-    assert state["stop_request_id"]
-    assert communication.methods.count("env.execute_command") == 1
-    assert communication.methods.count("env.stop") == 1
-
-
-def test_cancelling_a_queued_move_checks_the_original_stop_feedback(
-    toolkit, communication
-):
-    communication.mode = "hold"
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        move = pool.submit(toolkit.execute_tool, "move_relative", MOVE)
-        assert communication.queued.wait(timeout=2)
-        toolkit.cancel_active_and_wait()
-        result = move.result(timeout=3)
-    assert result.data.get("interrupted") is True
-    assert communication.methods.count("env.stop") == 1
-    assert communication.methods[-1] == "env.get_request"
-    queried = communication.requests[-1]["kwargs"]["request_id"]
-    assert communication.records[queried]["operation"] == "move_relative"
-    assert communication.records[queried]["result"]["reason"] == "shared stop requested"
-    state = toolkit.state.get().state
-    assert state["active_request_id"] is None and state["stop_error"] is None
-    assert state["stop_confirmed"] is True and state["last_move_request_id"] == queried
-    assert state["completed_moves"] == 0
-
-
-def test_stop_acknowledgement_alone_does_not_mean_stopped(toolkit, communication):
-    result = toolkit.execute_tool("stop_robot", {}).data
-    assert result["error"] and result["stop_confirmed"] is False
-    assert result["stop_request_id"] in communication.records
-    assert toolkit.state.get().state["stop_error"]
-
-
-def test_connection_change_blocks_later_motion_in_the_same_run(toolkit, communication):
-    assert not toolkit.execute_tool("move_relative", MOVE).is_error
-    communication.connection_epoch += 1
-    result = toolkit.execute_tool("move_relative", MOVE)
-    assert "reconnected" in result.data["error"]
-    assert communication.methods.count("env.execute_command") == 1
-
-
-def test_motion_bound_is_checked_before_sending(toolkit, communication):
-    move = {**MOVE, "dx_m": 4.0, "dy_m": 4.0}
-    assert toolkit.execute_tool("move_relative", move).is_error
-    assert "env.execute_command" not in communication.methods
-
-
-def test_public_cli_records_real_actions_through_the_http_service(
-    tmp_path, communication, monkeypatch
-):
-    from rpent.cli import main as cli
-
+def communication_endpoint(communication):
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
             assert self.path == "/call"
-            reply = communication.handle(
-                json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-            )
+            try:
+                reply = communication.handle(
+                    json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                )
+            except httpx.ReadTimeout:
+                self.close_connection = True
+                return
             body = json.dumps(reply).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -283,15 +188,143 @@ def test_public_cli_records_real_actions_through_the_http_service(
         def log_message(self, *args):
             pass
 
+    with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            yield f"http://127.0.0.1:{server.server_port}"
+        finally:
+            server.shutdown()
+            thread.join(timeout=2)
+
+
+def go2_args(endpoint):
+    return [
+        "-m",
+        "robots.unitree.mcp.real.server",
+        "--endpoint",
+        endpoint,
+        "--robot-index",
+        "1",
+    ]
+
+
+@pytest.fixture
+def go2_mcp(tmp_path, communication_endpoint, monkeypatch):
+    out = tmp_path / "run"
+    monkeypatch.setenv("RPENT_TASK_OUTPUT_DIR", str(out))
+    config = McpServerConfig(
+        transport="stdio",
+        command=sys.executable,
+        args=go2_args(communication_endpoint) + ["--action-timeout-s", "3"],
+        env_from=["RPENT_TASK_OUTPUT_DIR"],
+        tool_timeout_sec=8,
+    )
+    with closing(McpClient("real", config)) as client:
+        yield client, out / "real/latest.json"
+
+
+def test_failed_submission_with_server_id_is_reconciled_without_replay(
+    go2_mcp, communication
+):
+    client, state = go2_mcp
+    communication.mode = "rejected"
+    result = client.call_tool("move_relative", MOVE)
+    assert result.isError and "queue full" in result.content[0].text
+    record = json.loads(state.read_text())
+    assert record["last_move_status"] == "rejected"
+    request_id = record["last_move_request_id"]
+    assert request_id != communication.records[request_id]["client_request_id"]
+    assert communication.methods == [
+        "healthz",
+        "env.execute_command",
+        "env.get_request",
+    ]
+    assert record["error"]
+
+
+def test_lost_move_acknowledgement_blocks_new_motion(go2_mcp, communication):
+    client, path = go2_mcp
+    communication.mode = "lost_ack"
+    assert client.call_tool("move_relative", MOVE).isError
+    assert client.call_tool("move_relative", MOVE).isError
+    state = json.loads(path.read_text())
+    assert state["submission_uncertain"] and state["stop_error"]
+    assert state["stop_request_id"]
+    assert communication.methods.count("env.execute_command") == 1
+    assert communication.methods.count("env.stop") == 1
+
+
+def test_cancelling_a_queued_move_checks_the_original_stop_feedback(
+    go2_mcp, communication
+):
+    client, state_path = go2_mcp
+    communication.mode = "hold"
+    cancelled = threading.Event()
+
+    def check_cancelled():
+        if cancelled.is_set():
+            raise ToolCancelled("robot move cancelled")
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        move = pool.submit(
+            client.call_tool, "move_relative", MOVE, check_cancelled=check_cancelled
+        )
+        assert communication.queued.wait(timeout=2)
+        cancelled.set()
+        with pytest.raises(ToolCancelled):
+            move.result(timeout=3)
+    client.close()  # As on toolkit shutdown, EOF cancels the server-side request.
+    assert communication.methods.count("env.stop") == 1
+    assert communication.methods[-1] == "env.get_request"
+    queried = communication.requests[-1]["kwargs"]["request_id"]
+    assert communication.records[queried]["operation"] == "move_relative"
+    assert communication.records[queried]["result"]["reason"] == "shared stop requested"
+    state = json.loads(state_path.read_text())
+    assert state["active_request_id"] is None and state["stop_error"] is None
+    assert state["stop_confirmed"] is True and state["last_move_request_id"] == queried
+    assert state["completed_moves"] == 0
+
+
+def test_stop_acknowledgement_alone_does_not_mean_stopped(go2_mcp, communication):
+    client, path = go2_mcp
+    assert client.call_tool("stop_robot", {}).isError
+    state = json.loads(path.read_text())
+    assert state["stop_confirmed"] is False
+    assert state["stop_request_id"] in communication.records
+    assert state["stop_error"]
+
+
+def test_connection_change_blocks_later_motion_in_the_same_run(go2_mcp, communication):
+    client, _ = go2_mcp
+    assert not client.call_tool("move_relative", MOVE).isError
+    communication.connection_epoch += 1
+    result = client.call_tool("move_relative", MOVE)
+    assert result.isError and "reconnected" in result.content[0].text
+    assert communication.methods.count("env.execute_command") == 1
+
+
+def test_motion_bound_is_checked_before_sending(go2_mcp, communication):
+    client, _ = go2_mcp
+    move = {**MOVE, "dx_m": 4.0, "dy_m": 4.0}
+    assert client.call_tool("move_relative", move).isError
+    assert "env.execute_command" not in communication.methods
+
+
+def test_public_cli_records_real_actions_through_mcp(
+    tmp_path, communication, communication_endpoint, monkeypatch
+):
+    from rpent.cli import main as cli
+
     class Terminal(io.StringIO):
         def isatty(self):
             return True
 
     plans = iter(
         [
-            ("get_robot_status", {}),
-            ("move_relative", MOVE),
-            ("capture_image", {"rgbd": True, "after_motion": True}),
+            ("mcp__real__get_robot_status", {}),
+            ("mcp__real__move_relative", MOVE),
+            ("mcp__real__capture_image", {"rgbd": True, "after_motion": True}),
             ("finish", {"status": "success", "summary": "移动完成，照片保存于本体"}),
         ]
     )
@@ -299,10 +332,10 @@ def test_public_cli_records_real_actions_through_the_http_service(
     async def stream(messages, info):
         names = {tool.name for tool in info.function_tools}
         assert {
-            "move_relative",
-            "get_robot_request",
-            "stop_robot",
-            "capture_image",
+            "mcp__real__move_relative",
+            "mcp__real__get_robot_request",
+            "mcp__real__stop_robot",
+            "mcp__real__capture_image",
         } <= names
         assert "follow_navigation" not in names
         name, arguments = next(plans)
@@ -313,51 +346,48 @@ def test_public_cli_records_real_actions_through_the_http_service(
         lambda *a, **k: FunctionModel(stream_function=stream),
     )
     monkeypatch.setattr(sys, "stdin", Terminal())
-    with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        try:
-            out = tmp_path / "run"
-            monkeypatch.setattr(
-                sys,
-                "argv",
-                [
-                    "rpent",
-                    "--robot",
-                    "unitree",
-                    "--unitree-mode",
-                    "real",
-                    "--real-endpoint",
-                    f"http://127.0.0.1:{server.server_port}",
-                    "--robot-index",
-                    "1",
-                    "--planner",
-                    "api",
-                    "--model",
-                    "openai-chat:offline-go2",
-                    "--reasoning-effort",
-                    "none",
-                    "--max-turns",
-                    "4",
-                    "--planner-timeout-s",
-                    "10",
-                    "--task",
-                    "前进并抓拍",
-                    "--output-dir",
-                    str(out),
-                ],
-            )
-            assert cli.main() == 0
-        finally:
-            server.shutdown()
-            thread.join(timeout=2)
+    out = tmp_path / "run"
+    monkeypatch.setenv("RPENT_TASK_OUTPUT_DIR", str(out))
+    mcp_config = tmp_path / "mcp.toml"
+    mcp_config.write_text(
+        '[mcp_servers.real]\ntransport = "stdio"\n'
+        f"command = {json.dumps(sys.executable)}\n"
+        f"args = {json.dumps(go2_args(communication_endpoint))}\n"
+        'env_from = ["RPENT_TASK_OUTPUT_DIR"]\n'
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "rpent",
+            "--robot",
+            "unitree",
+            "--mcp-config",
+            str(mcp_config),
+            "--planner",
+            "api",
+            "--model",
+            "openai-chat:offline-go2",
+            "--reasoning-effort",
+            "none",
+            "--max-turns",
+            "4",
+            "--planner-timeout-s",
+            "12",
+            "--task",
+            "前进并抓拍",
+            "--output-dir",
+            str(out),
+            "--memory-dir",
+            str(tmp_path / "memory"),
+        ],
+    )
+    assert cli.main() == 0
     record = json.loads(next(out.glob("transcript_unitree_*.json")).read_text())
-    assert record["unitree_mode"] == "real"
+    assert record["validation_scope"] == "unitree_mcp"
     assert record["finish"]["status"] == "success" and record["error"] is None
     assert communication.methods.count("env.execute_command") == 1
     assert communication.methods.count("env.get_request") == 1
     assert communication.methods.count("env.capture_image") == 1
-    states = json.loads((out / "states.json").read_text())["steps"]
-    assert states[-1]["result"]["image_content_available"] is False
-    assert states[-1]["result"]["result"]["files"]["color"] == "/robot/color.jpg"
+    assert "/robot/color.jpg" in json.dumps(record["messages"])
     assert json.loads((out / "real/latest.json").read_text())["completed_moves"] == 1

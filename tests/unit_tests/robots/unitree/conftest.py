@@ -18,12 +18,15 @@ from __future__ import annotations
 
 import json
 import math
+import socket
 import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import time
+from contextlib import closing, contextmanager
 from types import SimpleNamespace
 
 import httpx
 import pytest
+import uvicorn
 
 
 @pytest.fixture(autouse=True)
@@ -242,58 +245,50 @@ def navigation_services():
         )
 
 
-@pytest.fixture
-def navigation_loopback(navigation_services):
-    """Expose the document-shaped service over actual localhost HTTP sockets."""
-    from robots.unitree.navigation_client import NavigationClient
-    from robots.unitree.simulation_client import SimulationClient
-
-    def handler_for(host):
-        class Handler(BaseHTTPRequestHandler):
-            def do_GET(self):
-                self.dispatch("GET")
-
-            def do_POST(self):
-                self.dispatch("POST")
-
-            def dispatch(self, method):
-                size = int(self.headers.get("Content-Length", "0"))
-                request = httpx.Request(
-                    method, f"http://{host}{self.path}", content=self.rfile.read(size)
-                )
-                response = navigation_services.handle(request)
-                self.send_response(response.status_code)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(response.content)
-
-            def log_message(self, *args):
-                pass
-
-        return Handler
-
-    servers = [
-        ThreadingHTTPServer(("127.0.0.1", 0), handler_for(host))
-        for host in ("nav.test", "sim.test")
-    ]
-    threads = [
-        threading.Thread(
-            target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+@contextmanager
+def run_mcp(mcp):
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+        server = uvicorn.Server(
+            uvicorn.Config(mcp.streamable_http_app(), log_level="warning")
         )
-        for server in servers
-    ]
-    for thread in threads:
-        thread.start()
-    nav = NavigationClient(f"http://127.0.0.1:{servers[0].server_port}")
-    sim = SimulationClient(f"http://127.0.0.1:{servers[1].server_port}")
-    try:
-        yield SimpleNamespace(state=navigation_services.state, nav=nav, sim=sim)
-    finally:
-        nav.close()
-        sim.close()
-        for server in servers:
-            server.shutdown()
-            server.server_close()
-        for thread in threads:
-            thread.join(timeout=2)
-            assert not thread.is_alive()
+        worker = threading.Thread(
+            target=server.run, kwargs={"sockets": [listener]}, daemon=True
+        )
+        worker.start()
+        try:
+            deadline = time.monotonic() + 5
+            while not server.started:
+                assert time.monotonic() < deadline and worker.is_alive()
+                time.sleep(0.01)
+            yield f"http://127.0.0.1:{port}/mcp"
+        finally:
+            server.should_exit = True
+            worker.join(5)
+            assert not worker.is_alive()
+
+
+@pytest.fixture
+def serve_mcp():
+    """Serve a FastMCP instance on a loopback port."""
+    return run_mcp
+
+
+@pytest.fixture
+def mcp_navigation(navigation_services):
+    """Expose the real MCP adapters in front of offline backend responses."""
+    from robots.unitree.mcp.astar.server import create_astar_mcp
+    from robots.unitree.mcp.mujoco.server import create_mujoco_mcp
+    from rpent.tools.mcp_client import McpClient, McpServerConfig
+
+    astar = create_astar_mcp(navigation_services.nav, host="127.0.0.1", port=0)
+    with (
+        run_mcp(astar) as astar_url,
+        closing(McpClient("astar", McpServerConfig(url=astar_url))) as planner,
+    ):
+        sim = create_mujoco_mcp(
+            navigation_services.sim, planner, host="127.0.0.1", port=0, walk_timeout_s=1
+        )
+        with run_mcp(sim) as sim_url:
+            yield SimpleNamespace(astar_url=astar_url, sim_url=sim_url)

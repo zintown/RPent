@@ -12,10 +12,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Compatibility entry point for MuJoCo route execution."""
-
-from robots.unitree.mcp.mujoco.server import create_mujoco_mcp as create_mujoco_mcp
-from robots.unitree.mcp.mujoco.server import main as main
-
-if __name__ == "__main__":
-    main()
+"""LightNav visual navigation MCP service."""
