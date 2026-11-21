@@ -71,6 +71,15 @@ cp -n mcp.toml "$RPENT_MCP_CONFIG"
 
 底层地址变化时，在配置的启动参数中设置 `--vln-endpoint`、`--observation-endpoint` 或 `--sim-endpoint`。`--vln-timeout-s` 默认 120 秒，`--vln-inference-timeout-s` 默认 3 秒。MCP 的 `tool_timeout_sec` 应留出 episode 结束后的停车与清理时间。
 
+在 `mcp.vln.local.toml` 中补充视觉导航的能力声明，供 DSH 调度时检查。
+
+```toml
+[capabilities.visual_navigation]
+description = "使用第一视角定位目标并执行局部视觉导航。"
+tools = ["vln.run_vln_navigation", "vln.get_vln_status", "vln.stop_vln_navigation"]
+checks = { "vln.get_vln_readiness" = { ready = true } }
+```
+
 ```bash
 bash run_rpent.sh \
   '使用 VLN 保持当前地图位置并确认停车。先读取当前位置作为验收坐标。'
@@ -86,6 +95,7 @@ bash run_rpent.sh \
 | --- | --- |
 | `run_vln_navigation(instruction, expected_goal=None, timeout_s=None)` | 一次调用内部循环，直到目标验收、模型 STOP、取消或失败 |
 | `get_vln_status()` | 最近一次会话、预测数量、控制权和停车证据 |
+| `get_vln_readiness()` | 检查仿真控制器、第一视角观测和 LightNav 连接 |
 | `stop_vln_navigation()` | 结束本工具拥有的控制会话并确认停车 |
 
 `expected_goal` 是已知地图坐标 `{x,y,yaw?}`，不是给模型的局部航点。只能使用
@@ -112,22 +122,24 @@ bash run_rpent.sh \
 
 ## MCP 任务状态
 
-活动工具持续写入 `navigation/vln/latest.json`。任务结束后，`run_task` 在 `navigation.vln` 中返回执行证据。
+活动工具持续写入 `navigation/vln/latest.json`。任务结束后，`run_task` 在 `evidence.navigation.vln` 中返回执行证据。
 
 ```json
 {
-  "navigation": {
-    "active_control_id": null,
-    "vln": {
-      "episode_id": "vln_...",
-      "state": "finished",
-      "predictions": 7,
-      "accepted_references": 7,
-      "latency_ms": 250.0,
-      "capture_age_s": 0.31,
-      "model_stop": false,
-      "stop_confirmed": true,
-      "goal_verified": true
+  "evidence": {
+    "navigation": {
+      "active_control_id": null,
+      "vln": {
+        "episode_id": "vln_...",
+        "state": "finished",
+        "predictions": 7,
+        "accepted_references": 7,
+        "latency_ms": 250.0,
+        "capture_age_s": 0.31,
+        "model_stop": false,
+        "stop_confirmed": true,
+        "goal_verified": true
+      }
     }
   }
 }

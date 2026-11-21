@@ -19,7 +19,8 @@ from __future__ import annotations
 import base64
 import os
 import re
-from collections.abc import AsyncIterator, Callable
+from collections import ChainMap
+from collections.abc import AsyncIterator, Callable, Mapping
 from concurrent.futures import wait
 from contextlib import ExitStack, asynccontextmanager
 from functools import partial
@@ -152,7 +153,7 @@ def _error_message(error: Exception) -> str:
 
 @asynccontextmanager
 async def _transport(
-    config: McpServerConfig, headers: dict[str, str]
+    config: McpServerConfig, headers: dict[str, str], environment: Mapping[str, str]
 ) -> AsyncIterator[
     tuple[
         MemoryObjectReceiveStream[SessionMessage | Exception],
@@ -160,14 +161,14 @@ async def _transport(
     ]
 ]:
     if config.transport == "stdio":
-        environment = {}
+        stdio_env = {}
         for name in config.env_from:
-            if name not in os.environ:
+            if name not in environment:
                 raise ValueError(f"stdio requires environment variable {name}")
-            environment[name] = os.environ[name]
+            stdio_env[name] = environment[name]
         assert config.command is not None
         params = StdioServerParameters(
-            command=config.command, args=config.args, cwd=config.cwd, env=environment
+            command=config.command, args=config.args, cwd=config.cwd, env=stdio_env
         )
         async with stdio_client(params) as streams:
             yield streams
@@ -188,9 +189,9 @@ async def _transport(
 
 @asynccontextmanager
 async def _connect(
-    config: McpServerConfig, headers: dict[str, str]
+    config: McpServerConfig, headers: dict[str, str], environment: Mapping[str, str]
 ) -> AsyncIterator[tuple[ClientSession, dict[str, types.Tool]]]:
-    async with _transport(config, headers) as (read, write):
+    async with _transport(config, headers, environment) as (read, write):
         async with ClientSession(read, write) as session:
             tools: dict[str, types.Tool] = {}
             with fail_after(config.startup_timeout_sec):
@@ -218,12 +219,19 @@ async def _connect(
 class McpClient:
     """Own one MCP connection for synchronous toolkit or navigation callers."""
 
-    def __init__(self, name: str, config: McpServerConfig) -> None:
+    def __init__(
+        self,
+        name: str,
+        config: McpServerConfig,
+        *,
+        env_overrides: Mapping[str, str] | None = None,
+    ) -> None:
         self.name = name
         self._timeout = config.tool_timeout_sec
+        environment = ChainMap(env_overrides or {}, os.environ)
         headers = {}
         if config.bearer_token_env_var is not None:
-            token = os.environ.get(config.bearer_token_env_var)
+            token = environment.get(config.bearer_token_env_var)
             if not token:
                 raise McpServiceError(
                     f"MCP server {name!r} requires {config.bearer_token_env_var}"
@@ -233,7 +241,7 @@ class McpClient:
             with ExitStack() as connections:
                 self._portal = connections.enter_context(start_blocking_portal())
                 context = self._portal.wrap_async_context_manager(
-                    _connect(config, headers)
+                    _connect(config, headers, environment)
                 )
                 self._session, self.tools = connections.enter_context(context)
                 self._connections = connections.pop_all()

@@ -53,6 +53,27 @@ def follow(clients, plan_id):
     return clients[1].call_tool("follow_plan", {"plan_id": plan_id})
 
 
+def test_navigation_status_requires_idle_simulator_and_matching_map(
+    clients, navigation_services
+):
+    _, sim = clients
+    state = navigation_services.state
+    assert sim.call_tool("get_navigation_status", {}).structuredContent == {
+        "ready": True,
+        "map_id": "test_room",
+        "map_version": "v1",
+    }
+    state.sim_version = "different-map"
+    assert (
+        sim.call_tool("get_navigation_status", {}).structuredContent["ready"] is False
+    )
+    state.sim_version = "v1"
+    state.simulator_running = False
+    assert (
+        sim.call_tool("get_navigation_status", {}).structuredContent["ready"] is False
+    )
+
+
 def test_preserves_exact_plan_and_prevents_duplicate_submission(
     clients, navigation_services
 ):

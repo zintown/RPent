@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Own persistent Unitree task records and their launcher processes."""
+"""Own persistent robot task records and their launcher processes."""
 
 from __future__ import annotations
 
@@ -31,10 +31,14 @@ from pathlib import Path
 from tempfile import mkdtemp
 from typing import Any
 
+import tomlkit
+
 from rpent.evaluation import write_json_atomic
+from rpent.mcp.task.config import TaskDeployment
+from rpent.robots.robot_spec import TaskEvidence
 from rpent.utils.logging import get_logger
 
-logger = get_logger("unitree_task_server")
+logger = get_logger("task_mcp")
 ACTIVE_STATUSES = {"starting", "running", "stopping"}
 ATTENTION_STATUSES = {"interrupted", "requires_attention"}
 
@@ -68,7 +72,7 @@ class TaskRunner:
 
     A filesystem lease prevents two services using the same job directory.
     Standalone CLI runs and services using other directories are outside this
-    lease; the simulator must still have one owner. Interrupted records require
+    lease; each robot must still have one owner. Interrupted records require
     operator reconciliation rather than automatic motion replay.
     """
 
@@ -76,11 +80,21 @@ class TaskRunner:
         self,
         repo_root: Path,
         jobs_dir: Path,
+        deployment: TaskDeployment,
         *,
         stop_timeout_s: float = 30.0,
     ) -> None:
         self.repo_root = repo_root.resolve()
         self.jobs_dir = jobs_dir.resolve()
+        self.deployment = deployment
+        self._mcp_config = tomlkit.dumps(
+            {
+                "mcp_servers": {
+                    name: config.model_dump(exclude_none=True)
+                    for name, config in deployment.servers.items()
+                }
+            }
+        )
         self.jobs_dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._active: _Job | None = None
@@ -107,85 +121,6 @@ class TaskRunner:
     def _persist(self, job: _Job) -> None:
         write_json_atomic(job.directory / "job.json", job.record)
 
-    def _refresh(self, job: _Job) -> None:
-        """Read available evidence; state files describe completed tool calls."""
-        record = job.record
-        if record["output_dir"] is None:
-            with Path(record["log_file"]).open("rb") as handle:
-                prefix = handle.read(32768).decode("utf-8", errors="replace")
-            match = re.search(r"^RPent output: (.+)$", prefix, re.MULTILINE)
-            if match:
-                output = Path(match[1].strip())
-                record["output_dir"] = str((self.repo_root / output).resolve())
-        if record["output_dir"] is None:
-            return
-        output = Path(record["output_dir"])
-        state_time = 0
-        try:
-            state_path = output / "states.json"
-            state = _read_json(state_path)
-            steps = state.get("steps", [])
-            if steps:
-                record["navigation"] = steps[-1].get("state")
-                state_time = state_path.stat().st_mtime_ns
-        except (OSError, ValueError):
-            pass  # The producer may still be replacing its file.
-        # A cancelled tool also writes a walk report during its cleanup.
-        reports = sorted(
-            (output / "navigation" / "walks").glob("*.json"),
-            key=lambda path: path.stat().st_mtime_ns,
-        )
-        if reports and reports[-1].stat().st_mtime_ns > state_time:
-            try:
-                report = _read_json(reports[-1])
-                record["navigation"] = (record["navigation"] or {}) | {
-                    key: report[key]
-                    for key in (
-                        "completed_navigation_goals",
-                        "active_walk_id",
-                        "submission_uncertain",
-                        "pose",
-                        "error",
-                        "stop_error",
-                    )
-                    if key in report
-                }
-            except (OSError, ValueError):
-                pass
-        # The VLN tool persists compact progress while its one long call runs.
-        vln_path = output / "navigation" / "vln" / "latest.json"
-        try:
-            if vln_path.stat().st_mtime_ns > state_time:
-                vln = _read_json(vln_path)
-                navigation = record["navigation"] or {}
-                record["navigation"] = navigation | {
-                    "vln": vln,
-                    "active_control_id": vln.get("active_control_id"),
-                    "submission_uncertain": vln.get("submission_uncertain", False),
-                    "stop_error": vln.get("stop_error"),
-                    "pose": vln.get("pose") or navigation.get("pose"),
-                }
-        except (OSError, ValueError):
-            pass
-        try:
-            real_robot = _read_json(output / "real" / "latest.json")
-            record["navigation"] = (record["navigation"] or {}) | {
-                "real_robot": real_robot
-            }
-        except (OSError, ValueError):
-            pass
-        transcripts = sorted(output.glob("transcript_unitree*.json"))
-        if transcripts:
-            try:
-                transcript = _read_json(transcripts[-1])
-                record.update(
-                    finish=transcript.get("finish"),
-                    error=transcript.get("error"),
-                    stats=transcript.get("stats"),
-                )
-            except (OSError, ValueError):
-                pass
-
     def start(self, instruction: str) -> _Job:
         """Start a new instruction with an internally allocated run directory."""
         if not instruction.strip():
@@ -200,21 +135,27 @@ class TaskRunner:
                     "verify the previous task and equipment before starting another task"
                 )
             directory = Path(mkdtemp(prefix="run-", dir=self.jobs_dir))
+            output_dir = directory / "output"
+            output_dir.mkdir()
+            mcp_config = directory / "mcp.toml"
+            mcp_config.write_text(self._mcp_config, encoding="utf-8")
             log_file = directory / "stdout.log"
             log_file.touch()
             job = _Job(
                 record={
+                    "robot_id": self.deployment.robot.id,
                     "instruction": instruction,
                     "status": "starting",
                     "created_at": _now(),
                     "finished_at": None,
                     "pid": None,
                     "exit_code": None,
-                    "output_dir": None,
+                    "output_dir": str(output_dir),
                     "log_file": str(log_file),
                     "finish": None,
                     "error": None,
                     "stats": None,
+                    "evidence": {},
                     "navigation": None,
                     "stop_requested": False,
                     "forced_stop": False,
@@ -225,7 +166,13 @@ class TaskRunner:
             slave = None
             try:
                 job.terminal_fd, slave = pty.openpty()
-                environment = dict(os.environ, PYTHONUNBUFFERED="1")
+                environment = dict(
+                    os.environ,
+                    PYTHONUNBUFFERED="1",
+                    RPENT_DISPATCH_ADAPTER=self.deployment.robot.adapter,
+                    RPENT_DISPATCH_MCP_CONFIG=str(mcp_config),
+                    RPENT_DISPATCH_OUTPUT_DIR=str(output_dir),
+                )
                 with log_file.open("ab", buffering=0) as output:
                     job.process = subprocess.Popen(
                         [
@@ -267,22 +214,33 @@ class TaskRunner:
         exit_code = job.process.wait()
         with self._lock:
             try:
-                self._refresh(job)
                 record = job.record
-                navigation = record["navigation"] or {}
-                vln = navigation.get("vln") or {}
-                real_robot = navigation.get("real_robot") or {}
-                finish = record["finish"] or {}
+                output = Path(record["output_dir"])
+                transcripts = sorted(output.glob("transcript_*.json"))
+                transcript = _read_json(transcripts[-1]) if transcripts else {}
+                read_evidence = self.deployment.execution.read_evidence
+                evidence = (
+                    read_evidence(output, transcript)
+                    if read_evidence
+                    else TaskEvidence()
+                )
+                finish = transcript.get("finish") or {}
+                record.update(
+                    finish=transcript.get("finish"),
+                    error=transcript.get("error") or evidence.error,
+                    stats=transcript.get("stats"),
+                    evidence=evidence.data,
+                    navigation=evidence.data.get("navigation"),
+                )
                 if (
                     record["forced_stop"]
-                    or navigation.get("active_walk_id")
-                    or navigation.get("active_control_id")
-                    or navigation.get("submission_uncertain")
-                    or navigation.get("stop_error")
-                    or real_robot.get("active_request_id")
-                    or real_robot.get("submission_uncertain")
-                    or real_robot.get("stop_error")
+                    or evidence.requires_attention
                     or (exit_code < 0 and not record["stop_requested"])
+                    or (
+                        record["stop_requested"]
+                        and self.deployment.robot.environment == "real"
+                        and read_evidence is None
+                    )
                 ):
                     status = "requires_attention"
                 elif record["stop_requested"]:
@@ -290,17 +248,12 @@ class TaskRunner:
                 elif (
                     exit_code == 0
                     and not record["error"]
-                    and not navigation.get("error")
-                    and vln.get("state") == "verification_required"
-                    and not vln.get("error")
+                    and evidence.verification_required
                 ):
                     status = "verification_required"
                 elif (
                     exit_code != 0
                     or record["error"]
-                    or vln.get("error")
-                    or vln.get("state") == "failed"
-                    or real_robot.get("error")
                     or finish.get("status") in {"failure", "stuck"}
                 ):
                     status = "failed"
@@ -316,15 +269,12 @@ class TaskRunner:
                 record.update(status=status, exit_code=exit_code, finished_at=_now())
                 if status == "requires_attention" and not record["error"]:
                     record["error"] = (
-                        navigation.get("stop_error")
-                        or real_robot.get("stop_error")
+                        evidence.stop_error
                         or "process cleanup or remote motion state needs verification"
                     )
                 if status == "failed" and not record["error"]:
                     record["error"] = (
-                        real_robot.get("error")
-                        or finish.get("summary")
-                        or f"process exited with code {exit_code}"
+                        finish.get("summary") or f"process exited with code {exit_code}"
                     )
                 self._persist(job)
                 logger.info(
@@ -335,9 +285,16 @@ class TaskRunner:
                 )
             except Exception:
                 job.record.update(
-                    status="requires_attention", exit_code=exit_code, finished_at=_now()
+                    status="requires_attention",
+                    exit_code=exit_code,
+                    finished_at=_now(),
+                    error="cannot record terminal task evidence",
                 )
                 logger.exception("Cannot record result for task in %s", job.directory)
+                try:
+                    self._persist(job)
+                except OSError:
+                    logger.exception("Cannot persist task state in %s", job.directory)
             finally:
                 if job.terminal_fd is not None:
                     os.close(job.terminal_fd)

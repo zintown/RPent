@@ -21,16 +21,16 @@ import sys
 import time
 from pathlib import Path
 
-from robots.unitree.mcp.task.runner import TaskRunner
+from rpent.mcp.task.config import load_deployment
+from rpent.mcp.task.runner import TaskRunner
 
 CHILD = r"""
-import json, time
+import json, os, time
 from pathlib import Path
 root = Path.cwd()
-out = root / 'out'
+out = Path(os.environ["RPENT_DISPATCH_OUTPUT_DIR"])
 vln = out / 'navigation/vln'
 vln.mkdir(parents=True)
-print('RPent output: out', flush=True)
 def write(state):
     p = vln / 'latest.json'
     t = p.with_suffix('.tmp')
@@ -68,7 +68,11 @@ def make_runner(tmp_path: Path) -> TaskRunner:
     (tmp_path / "run_rpent.sh").write_text(
         f"exec {shlex.quote(sys.executable)} {shlex.quote(str(tmp_path / 'child.py'))}\n"
     )
-    return TaskRunner(tmp_path, tmp_path / "jobs")
+    config = tmp_path / "mcp.toml"
+    config.write_text("[mcp_servers]\n")
+    return TaskRunner(
+        tmp_path, tmp_path / "jobs", load_deployment(config, legacy_unitree=True)
+    )
 
 
 def test_live_vln_progress_clears_uncertain_acceptance_and_preserves_verification(

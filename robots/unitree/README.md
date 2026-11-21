@@ -15,7 +15,7 @@ bash run_rpent.sh '查询 Go2 当前位姿'
 | MuJoCo | [mcp/mujoco/server.py](mcp/mujoco/server.py) | [仿真执行](MUJOCO_USAGE.zh-CN.md) |
 | LightNav | [mcp/vln/server.py](mcp/vln/server.py) | [视觉导航](VLN_USAGE.zh-CN.md) |
 | Go2 真机 | [mcp/real/server.py](mcp/real/server.py) | [真机接入](REAL_USAGE.zh-CN.md)、[A* 短路线测试](REAL_TEST_PLAN.zh-CN.md) |
-| 任务调度 | [mcp/task/server.py](mcp/task/server.py) | [DSH 接入](TASK_MCP.zh-CN.md) |
+| 任务调度 | [rpent.mcp.task.server](../../rpent/mcp/task/server.py) | [DSH 接入](TASK_MCP.zh-CN.md) |
 
 A* 和 MuJoCo 转接服务使用 Streamable HTTP。LightNav 和 Go2 真机转接程序使用 stdio，由 RPent 为每条任务启动。它们各自连接已运行的推理、仿真或真机通信进程。
 

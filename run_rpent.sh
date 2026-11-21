@@ -16,6 +16,7 @@ if [[ $# -eq 1 && "$1" == '--help' ]]; then
 可选环境变量：
   RPENT_CONFIG_FILE               自定义 Bash 配置文件
   RPENT_MCP_CONFIG                MCP 配置文件，默认仓库根目录的 mcp.toml
+  RPENT_ROBOT_ADAPTER             手动运行时的机器人适配器，默认 unitree
   RPENT_VENV_DIR                  已安装 RPent 的虚拟环境目录
   RPENT_MODEL                     模型，默认 openai:deepseek-flash
   RPENT_PLANNER_TIMEOUT_S         模型会话预算，默认 900 秒
@@ -36,6 +37,9 @@ fi
 
 rpent_repo_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 rpent_config_file="${RPENT_CONFIG_FILE:-$rpent_repo_dir/.env.local}"
+rpent_dispatch_adapter="${RPENT_DISPATCH_ADAPTER:-}"
+rpent_dispatch_config="${RPENT_DISPATCH_MCP_CONFIG:-}"
+rpent_dispatch_output="${RPENT_DISPATCH_OUTPUT_DIR:-}"
 if [[ -f "$rpent_config_file" ]]; then
     source "$rpent_config_file"
 elif [[ -n "${RPENT_CONFIG_FILE:-}" ]]; then
@@ -52,8 +56,11 @@ fi
 # 从其他目录调用时，也以仓库为基准解析路径。
 rpent_python=$(cd -- "$(dirname -- "$rpent_python")" && pwd)/python
 cd -- "$rpent_repo_dir"
-mkdir -p -- "${RPENT_RUNS_DIR:-logs}"
-rpent_run_dir=$(mktemp -d "${RPENT_RUNS_DIR:-logs}/rpend-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")
+rpent_run_dir="$rpent_dispatch_output"
+if [[ -z "$rpent_run_dir" ]]; then
+    mkdir -p -- "${RPENT_RUNS_DIR:-logs}"
+    rpent_run_dir=$(mktemp -d "${RPENT_RUNS_DIR:-logs}/rpend-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")
+fi
 export RPENT_TASK_OUTPUT_DIR="$(cd -- "$rpent_run_dir" && pwd)"
 echo "RPent output: $rpent_run_dir"
 
@@ -62,7 +69,8 @@ if [[ -n "${RPENT_MEMORY_DIR:-}" ]]; then
     rpent_memory_args=(--memory-dir "$RPENT_MEMORY_DIR")
 fi
 exec "$rpent_python" -m rpent.cli.main \
-    --robot unitree --mcp-config "${RPENT_MCP_CONFIG:-$rpent_repo_dir/mcp.toml}" \
+    --robot "${rpent_dispatch_adapter:-${RPENT_ROBOT_ADAPTER:-unitree}}" \
+    --mcp-config "${rpent_dispatch_config:-${RPENT_MCP_CONFIG:-$rpent_repo_dir/mcp.toml}}" \
     "${rpent_memory_args[@]}" \
     --planner api --model "${RPENT_MODEL:-openai:deepseek-flash}" \
     --task="$1" \

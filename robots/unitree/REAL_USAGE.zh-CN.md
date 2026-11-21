@@ -20,7 +20,25 @@ export RPENT_MEMORY_DIR="$PWD/output/real-integration/memory"
 bash run_rpent.sh '查询 Go2 的在线、心跳和相机状态，报告结果。'
 ```
 
-DSH 通过 [RPent 任务 MCP](TASK_MCP.zh-CN.md) 下发同样的任务。启动 runner 时选择这份 `RPENT_MCP_CONFIG`。同机运行多个 runner 时，为各自设置监听端口、`--robot-id` 和任务目录。
+DSH 通过 [RPent 任务 MCP](TASK_MCP.zh-CN.md) 下发同样的任务。启动前在 `mcp.real.local.toml` 补充本体身份和可调度能力。示例使用上一步注册的 `real` 服务。
+
+```toml
+[robot]
+id = "go2-real-01"
+type = "unitree.go2"
+environment = "real"
+adapter = "unitree"
+
+[capabilities.relative_motion]
+description = "执行明确的机身坐标相对移动并确认停车。"
+tools = ["real.get_robot_status", "real.move_relative", "real.stop_robot"]
+checks = { "real.get_robot_status" = { status = "online", heartbeat_healthy = true } }
+
+[capabilities.camera_capture]
+description = "抓拍并返回照片路径。"
+tools = ["real.get_robot_status", "real.capture_image"]
+checks = { "real.get_robot_status" = { status = "online", "camera.ready" = true, "camera.stale" = false } }
+```
 
 ## 调用与验收
 
@@ -34,6 +52,6 @@ DSH 通过 [RPent 任务 MCP](TASK_MCP.zh-CN.md) 下发同样的任务。启动 
 
 每次相对移动以动作开始时的朝向为准。正 x 向前，正 y 向左，合成位移最多 5 米，正角向左。移动前由现场操作者确认本体、控制器和场地。动作默认最多等待 180 秒，可用真机 MCP 的 `--action-timeout-s` 调整。
 
-以已完成的运动反馈和停车证据确认执行。`real/latest.json` 记录请求编号和停车状态，DSH 可在任务的 `navigation.real_robot` 中读取。反馈丢失或停车未确认时，先核对现场和原请求。收到中断时，MCP 服务会尝试停止并核对原运动。
+以已完成的运动反馈和停车证据确认执行。`real/latest.json` 记录请求编号和停车状态，DSH 可在任务的 `evidence.navigation.real_robot` 中读取。反馈丢失或停车未确认时，先核对现场和原请求。收到中断时，MCP 服务会尝试停止并核对原运动。
 
 按 A* 地图自动导航需要真机实时定位和路径跟踪。具备实测起点和朝向时，可用 [A* 短路线测试](REAL_TEST_PLAN.zh-CN.md)验证一次直线移动。

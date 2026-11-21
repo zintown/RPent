@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -50,6 +50,24 @@ class RunConfig:
     prompt_vars: dict[str, Any]
     task_desc: dict[str, Any]
     enable_direct_action: bool = False
+
+
+@dataclass(frozen=True)
+class TaskEvidence:
+    """Robot-owned evidence and any terminal condition it establishes."""
+
+    data: dict[str, Any] = field(default_factory=dict)
+    requires_attention: bool = False
+    verification_required: bool = False
+    error: str | None = None
+    stop_error: str | None = None
+
+
+@dataclass(frozen=True)
+class TaskExecutionSpec:
+    """Opt into natural-language dispatch and supply evidence after execution."""
+
+    read_evidence: Callable[[Path, dict[str, Any]], TaskEvidence] | None = None
 
 
 @dataclass(frozen=True)
@@ -91,3 +109,5 @@ class RobotSpec:
     #: Takes the toolkit, the cell tag, and a note sink; returns at least
     #: ``{"done": bool}``. Left unset by robots without Flash Mode.
     run_flash: Callable[[Any, str, Callable[[str], None]], dict[str, Any]] | None = None
+    #: This adapter accepts the natural-language --task option used by task MCP.
+    task_execution: TaskExecutionSpec | None = None

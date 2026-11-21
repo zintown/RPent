@@ -28,7 +28,11 @@ from mcp.types import ToolAnnotations
 from starlette.requests import Request
 
 from robots.unitree.http_client import ServiceError, finite_number, map_identity
-from robots.unitree.simulation_client import SimulationClient, validate_walk_arrival
+from robots.unitree.simulation_client import (
+    SimulationClient,
+    simulator_can_move,
+    validate_walk_arrival,
+)
 from rpent.tools.mcp_client import McpClient, McpServerConfig
 
 
@@ -106,6 +110,24 @@ def create_mujoco_mcp(
         return await to_thread.run_sync(simulation.get_pose)
 
     @server.tool(annotations=readonly)
+    async def get_navigation_status() -> dict[str, Any]:
+        """Check the live motion controller and whether its map matches A*."""
+        health = await to_thread.run_sync(simulation.health)
+        identity = map_identity(health)
+        waypoints = await to_thread.run_sync(planning.call_tool, "list_waypoints", {})
+        data = waypoints.structuredContent
+        if waypoints.isError or data is None or data.get("ok") is not True:
+            raise ServiceError("A* map could not be verified")
+        return {
+            "ready": simulator_can_move(health)
+            and not walk_lock.locked()
+            and not (health.get("control") or {}).get("requires_recovery")
+            and identity == map_identity(data),
+            "map_id": identity[0],
+            "map_version": identity[1],
+        }
+
+    @server.tool(annotations=readonly)
     async def get_walk_status() -> dict[str, Any]:
         """Read the latest simulator walk and its execution evidence."""
         return await to_thread.run_sync(simulation.get_walk_status)
@@ -143,12 +165,7 @@ def create_mujoco_mcp(
             if plan_id in failed_previews:
                 raise ServiceError("plan preview failed; replan before walking")
             route, health = await load_plan(plan_id)
-            if (
-                not health["simulator_running"]
-                or health.get("control_mode", "idle") != "idle"
-                or health.get("other_controllers")
-                or (health.get("walk") or {}).get("state") == "running"
-            ):
+            if not simulator_can_move(health):
                 raise ServiceError("simulator is unavailable or busy")
             legs = route.get("legs")
             if not isinstance(legs, list) or len(legs) != 1:

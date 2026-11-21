@@ -19,19 +19,17 @@ from anyio import fail_after
 from mcp import ClientSession, types
 from mcp.client.streamable_http import streamable_http_client
 
-from robots.unitree.mcp.task.server import create_app
+from rpent.mcp.task.server import create_app
 
 TOKEN = "offline-test-token"
 URL = "http://127.0.0.1:8780"
 CHILD = r"""
-import json, signal, sys, time
+import json, os, signal, sys, time
 from pathlib import Path
-from tempfile import mkdtemp
 
 root = Path.cwd()
-output = Path(mkdtemp(prefix="output-", dir=root))
+output = Path(os.environ["RPENT_DISPATCH_OUTPUT_DIR"])
 instruction = sys.argv[1]
-print('RPent output: ' + str(output), flush=True)
 with (root / 'launches.jsonl').open('a') as f:
     f.write(json.dumps(sys.argv[1:]) + '\n')
 if instruction == 'wait':
@@ -40,7 +38,30 @@ if instruction == 'wait':
     while True:
         time.sleep(.05)
 finish = {'status': 'failure' if instruction == 'failure' else 'success', 'summary': 'checked'}
-(output / 'transcript_unitree_test.json').write_text(json.dumps({'finish': finish, 'error': None}))
+(output / 'transcript_robot_test.json').write_text(json.dumps({'finish': finish, 'error': None}))
+"""
+
+ARM_SERVICE = """
+import os
+from pathlib import Path
+
+from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
+
+server = FastMCP("arm")
+output_dir = Path(os.environ["RPENT_TASK_OUTPUT_DIR"])
+assert output_dir.is_dir()
+
+@server.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
+def get_status() -> dict:
+    return {"ready": Path("arm-ready").exists()}
+
+@server.tool()
+def grasp() -> dict:
+    Path("grasped").touch()
+    return {"ready": True}
+
+server.run()
 """
 
 
@@ -50,6 +71,10 @@ def root(tmp_path: Path) -> Path:
     (tmp_path / "run_rpent.sh").write_text(
         f'exec {shlex.quote(sys.executable)} {shlex.quote(str(tmp_path / "child.py"))} "$@"\n'
     )
+    (tmp_path / "mcp.toml").write_text(
+        '[robot]\nid = "go2-test"\ntype = "unitree.go2"\nenvironment = "simulation"\n'
+        'adapter = "unitree"\n[mcp_servers]\n'
+    )
     return tmp_path
 
 
@@ -58,7 +83,7 @@ def make_app(root: Path, **kwargs):
         repo_root=root,
         jobs_dir=root / "jobs",
         token=TOKEN,
-        robot_id="go2-test",
+        mcp_config=root / "mcp.toml",
         **kwargs,
     )
 
@@ -92,8 +117,10 @@ def test_run_task_schema_and_terminal_result(root, path):
     async def run():
         async with connect(make_app(root), path) as (session, http, info, session_id):
             tools = (await session.list_tools()).tools
-            assert [tool.name for tool in tools] == ["run_task"]
-            assert set(tools[0].inputSchema["properties"]) == {"instruction"}
+            assert [tool.name for tool in tools] == ["get_robot_info", "run_task"]
+            assert tools[0].annotations.readOnlyHint
+            assert not tools[0].inputSchema["properties"]
+            assert set(tools[1].inputSchema["properties"]) == {"instruction"}
             assert "run_task" in info.instructions
             assert session_id()
             instruction = '查询 Go2 位姿 "quoted"'
@@ -104,6 +131,7 @@ def test_run_task_schema_and_terminal_result(root, path):
                 "summary": "checked",
                 "error": None,
                 "output_dir": result["output_dir"],
+                "evidence": {},
                 "navigation": None,
             }
             assert Path(result["output_dir"]).is_dir()
@@ -116,6 +144,56 @@ def test_run_task_schema_and_terminal_result(root, path):
             for line in (root / "launches.jsonl").read_text().splitlines()
         ]
         assert launches == [[instruction], [instruction]]
+
+    asyncio.run(run())
+
+
+def test_capabilities_reflect_discovered_tools_and_live_read_only_checks(root):
+    (root / "arm.py").write_text(ARM_SERVICE)
+    config = root / "mcp.toml"
+    config.write_text(
+        '[robot]\nid = "arm-02"\ntype = "franka.panda"\nenvironment = "real"\n'
+        '[mcp_servers.arm]\ntransport = "stdio"\n'
+        f"command = {json.dumps(sys.executable)}\n"
+        'args = ["arm.py"]\ncwd = "."\nenv_from = ["RPENT_TASK_OUTPUT_DIR"]\n'
+        '[mcp_servers.localization]\nurl = "http://127.0.0.1:1/mcp"\nenabled = false\n'
+        '[capabilities.grasp]\ndescription = "Pick up an object"\ntools = ["arm.grasp"]\n'
+        'checks = { "arm.get_status" = { ready = true } }\n'
+        '[capabilities.map_navigation]\ndescription = "Navigate a map"\n'
+        'tools = ["localization.get_pose", "arm.grasp"]\n'
+        '[capabilities.inspection]\ndescription = "Read status"\n'
+        'tools = ["arm.get_status"]\n'
+        '[capabilities.bad_probe]\ndescription = "Misconfigured check"\n'
+        'tools = ["arm.grasp"]\nchecks = { "arm.grasp" = { ready = true } }\n'
+    )
+
+    async def run():
+        async with connect(make_app(root)) as (session, *_):
+            result = await session.call_tool("get_robot_info", {})
+            assert not result.isError, result
+            info = result.structuredContent
+            assert info["robot_id"] == "arm-02"
+            assert info["robot_type"] == "franka.panda"
+            assert info["environment"] == "real"
+            assert info["state"] == "idle"
+            assert info["service_errors"] == {}
+            assert {cap["name"]: cap["status"] for cap in info["capabilities"]} == {
+                "grasp": "unavailable",
+                "map_navigation": "unavailable",
+                "inspection": "unverified",
+                "bad_probe": "unavailable",
+            }
+            (root / "arm-ready").touch()
+            info = (await session.call_tool("get_robot_info", {})).structuredContent
+            assert (
+                next(cap for cap in info["capabilities"] if cap["name"] == "grasp")[
+                    "status"
+                ]
+                == "ready"
+            )
+            assert not (root / "grasped").exists()
+            assert not (root / "launches.jsonl").exists()
+            assert (await run_task(session, "测试机械臂任务"))["robot_id"] == "arm-02"
 
     asyncio.run(run())
 
@@ -141,6 +219,8 @@ def test_mcp_cancellation_stops_only_owned_request_and_releases_runner(root):
                 with fail_after(5):
                     while not (root / "ready").exists():
                         await asyncio.sleep(0.01)
+                result = await session.call_tool("get_robot_info", {})
+                assert result.structuredContent["state"] == "busy"
                 blocked = await session.call_tool(
                     "run_task", {"instruction": "success"}
                 )

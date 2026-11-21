@@ -86,6 +86,11 @@ def create_vln_mcp(navigation: VlnNavigation, *, timeout_s: float = 120.0) -> Fa
         """Read the current or latest VLN episode and its stopping and goal evidence."""
         return navigation.snapshot()
 
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
+    async def get_vln_readiness() -> dict[str, Any]:
+        """Check the live camera, simulation controller and LightNav connection."""
+        return await to_thread.run_sync(navigation.readiness)
+
     @server.tool()
     async def stop_vln_navigation() -> dict[str, Any]:
         """Cancel the owned VLN control lease and check simulator stop confirmation."""

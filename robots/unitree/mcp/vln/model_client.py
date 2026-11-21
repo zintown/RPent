@@ -72,19 +72,29 @@ class VlnClient:
             raise ServiceError(f"VLN {action} failed: {data}")
         return data
 
-    def start_episode(self, episode_id: str) -> None:
-        """Open a new connection and explicitly clear its model frame history."""
+    def _connect(self) -> Any:
         from websockets.sync.client import connect
 
+        return connect(
+            self.endpoint,
+            proxy=None,
+            open_timeout=min(self.timeout_s, 5.0),
+            close_timeout=1.0,
+            max_size=8 * 1024 * 1024,
+        )
+
+    def check_ready(self) -> None:
+        """Verify LightNav on a separate connection without issuing a prediction."""
+        with self._connect() as connection:
+            self._exchange(
+                connection, "login", {"clientId": "rpent-readiness"}, self.timeout_s
+            )
+
+    def start_episode(self, episode_id: str) -> None:
+        """Open a new connection and explicitly clear its model frame history."""
         self.close()
         try:
-            connection = connect(
-                self.endpoint,
-                proxy=None,
-                open_timeout=min(self.timeout_s, 5.0),
-                close_timeout=1.0,
-                max_size=8 * 1024 * 1024,
-            )
+            connection = self._connect()
             with self._lock:
                 self._connection, self._sequence = connection, 0
             self._exchange(

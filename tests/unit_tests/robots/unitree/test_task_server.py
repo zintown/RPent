@@ -25,11 +25,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from robots.unitree.mcp.task.runner import (
+from rpent.mcp.task.config import load_deployment
+from rpent.mcp.task.runner import (
     TaskConflict,
     TaskRunner,
 )
-from robots.unitree.mcp.task.server import main
+from rpent.mcp.task.server import main
 
 CHILD = r"""
 import json
@@ -38,12 +39,10 @@ import signal
 import sys
 import time
 from pathlib import Path
-from tempfile import mkdtemp
 
 root = Path.cwd()
 mode = os.environ.get("RPENT_TEST_MODE", "success")
-output = Path(mkdtemp(prefix="output-", dir=root))
-print("RPent output: " + str(output.relative_to(root)), flush=True)
+output = Path(os.environ["RPENT_DISPATCH_OUTPUT_DIR"])
 with (root / "launches.jsonl").open("a") as handle:
     handle.write(json.dumps({"args": sys.argv[1:], "tty": sys.stdin.isatty()}) + "\n")
 navigation = {
@@ -92,12 +91,15 @@ class TaskServerTest(unittest.TestCase):
             f'exec {shlex.quote(sys.executable)} {shlex.quote(str(self.root / "child.py"))} "$@"\n'
         )
         self.jobs = self.root / "jobs"
+        config = self.root / "mcp.toml"
+        config.write_text("[mcp_servers]\n")
+        self.deployment = load_deployment(config, legacy_unitree=True)
         self.mode = patch.dict(os.environ, {"RPENT_TEST_MODE": "success"})
         self.mode.start()
         self.addCleanup(self.mode.stop)
 
     def runner(self, **kwargs):
-        runner = TaskRunner(self.root, self.jobs, **kwargs)
+        runner = TaskRunner(self.root, self.jobs, self.deployment, **kwargs)
         self.addCleanup(runner.close)
         return runner
 
@@ -220,7 +222,7 @@ Path("actual-args.json").write_text(json.dumps(vars(args)))
         runner = self.runner()
         job = runner.start("test")
         self.wait_ready()
-        [output] = self.root.glob("output-*")
+        [output] = self.jobs.glob("*/output")
         state_path = output / "states.json"
         state_time = state_path.stat().st_mtime_ns
         report_path = output / "navigation" / "walks" / "latest.json"
@@ -252,7 +254,7 @@ Path("actual-args.json").write_text(json.dumps(vars(args)))
         job = runner.start("test")
         self.wait_ready()
         with self.assertRaises(BlockingIOError):
-            TaskRunner(self.root, self.jobs)
+            TaskRunner(self.root, self.jobs, self.deployment)
         runner.close()
         self.assertEqual(runner.wait(job, 6)["status"], "stopped")
         restored = self.runner()

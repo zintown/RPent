@@ -1,3 +1,14 @@
+[robot]
+id = "go2-01"
+type = "unitree.go2"
+environment = "simulation"
+adapter = "unitree"
+
+[capabilities.map_navigation]
+description = "在已配置地图上规划路线，跟踪路径前往站位或坐标，并确认到达。"
+tools = ["astar.list_waypoints", "astar.plan_route", "mujoco.get_pose", "mujoco.follow_plan", "mujoco.get_walk_status"]
+checks = { "astar.list_waypoints" = { ok = true }, "mujoco.get_pose" = { fallen = false }, "mujoco.get_navigation_status" = { ready = true } }
+
 [mcp_servers.astar]
 url = "http://127.0.0.1:8790/mcp"
 enabled_tools = ["list_waypoints", "plan_route"]

@@ -29,7 +29,11 @@ from uuid import uuid4
 from robots.unitree.http_client import ServiceError, finite_number, map_identity
 from robots.unitree.mcp.vln.model_client import VlnClient
 from robots.unitree.mcp.vln.observation_client import ObservationClient
-from robots.unitree.simulation_client import SimulationClient, validate_pose
+from robots.unitree.simulation_client import (
+    SimulationClient,
+    simulator_can_move,
+    validate_pose,
+)
 from rpent.evaluation import write_json_atomic
 
 
@@ -84,6 +88,22 @@ class VlnNavigation:
                     "stop_error": self._stop_error,
                 }
             )
+
+    def readiness(self) -> dict[str, Any]:
+        """Check idle control, the live camera and the LightNav connection."""
+        health = self.sim.health()
+        identity = map_identity(health)
+        if (
+            self.active
+            or not simulator_can_move(health)
+            or (health.get("control") or {}).get("requires_recovery")
+            or self.sim.get_pose()["fallen"]
+        ):
+            return {"ready": False}
+        if map_identity(self.observation.observe()) != identity:
+            return {"ready": False}
+        self.model.check_ready()
+        return {"ready": True, "map_id": identity[0], "map_version": identity[1]}
 
     def _publish(self, **fields: Any) -> dict[str, Any]:
         with self._lock:
@@ -218,12 +238,7 @@ class VlnNavigation:
                 self._check_cancelled(check_cancelled)
                 health = self.sim.health()
                 identity = map_identity(health)
-                if (
-                    not health["simulator_running"]
-                    or health.get("control_mode", "idle") != "idle"
-                    or health.get("other_controllers")
-                    or (health.get("walk") or {}).get("state") == "running"
-                ):
+                if not simulator_can_move(health):
                     raise ServiceError("simulation must be idle before VLN navigation")
                 self.model.start_episode(episode)
                 self._check_cancelled(check_cancelled)

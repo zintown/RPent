@@ -420,6 +420,7 @@ def test_mcp_tools_return_evidence_and_enforce_the_episode_budget(tmp_path):
             assert {tool.name for tool in tools.tools} == {
                 "run_vln_navigation",
                 "get_vln_status",
+                "get_vln_readiness",
                 "stop_vln_navigation",
             }
             invalid = await client.call_tool(

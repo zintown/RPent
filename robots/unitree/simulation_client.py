@@ -37,6 +37,16 @@ def validate_pose(pose: Any) -> None:
         raise ServiceError("pose.fallen must be boolean")
 
 
+def simulator_can_move(health: dict[str, Any]) -> bool:
+    """Check whether the simulator has an idle motion controller."""
+    return (
+        health["simulator_running"]
+        and health.get("control_mode", "idle") == "idle"
+        and not health.get("other_controllers")
+        and (health.get("walk") or {}).get("state") != "running"
+    )
+
+
 def validate_walk_arrival(status: dict[str, Any], plan: dict[str, Any]) -> None:
     """Verify the service's single-goal result against the observed final pose."""
     result = status.get("result")

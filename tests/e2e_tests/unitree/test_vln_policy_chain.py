@@ -33,7 +33,7 @@ import httpx
 import pytest
 import uvicorn
 
-from robots.unitree.mcp.task.server import create_app
+from rpent.mcp.task.server import create_app
 from tests.e2e_tests.offline_planner_server import (
     OFFLINE_MODEL_NAME,
     OfflinePlannerServer,
@@ -49,13 +49,13 @@ pytestmark = pytest.mark.skipif(
 
 
 @contextmanager
-def task_api(jobs):
+def task_api(jobs, config):
     """Open an MCP connection to the runner that owns the TTY child."""
     listener = socket.socket()
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listener.bind(("127.0.0.1", 0))
     endpoint = f"http://127.0.0.1:{listener.getsockname()[1]}"
-    app = create_app(repo_root=REPO, jobs_dir=jobs, robot_id="go2-vln-test")
+    app = create_app(repo_root=REPO, jobs_dir=jobs, mcp_config=config)
     server = uvicorn.Server(uvicorn.Config(app, log_level="error", lifespan="on"))
     thread = threading.Thread(
         target=lambda: server.run(sockets=[listener]), daemon=True
@@ -101,6 +101,14 @@ def run_task(endpoint, output, *, cancel, origin):
         headers["Mcp-Session-Id"] = response.headers["Mcp-Session-Id"]
         headers["MCP-Protocol-Version"] = response.json()["result"]["protocolVersion"]
         post(http, "notifications/initialized", {})
+        info = post(
+            http,
+            "tools/call",
+            {"name": "get_robot_info", "arguments": {}},
+            request_id=2,
+        ).json()["result"]["structuredContent"]
+        assert info["robot_id"] == "go2-vln-test" and info["state"] == "idle", info
+        assert info["capabilities"][0]["status"] == "ready", info
         requested_stop = False
 
         def stop():
@@ -124,7 +132,7 @@ def run_task(endpoint, output, *, cancel, origin):
                         time.sleep(0.05)
                         continue
                     state_path = next(
-                        output.glob("runs/*/navigation/vln/latest.json"), None
+                        output.glob("jobs/*/output/navigation/vln/latest.json"), None
                     )
                     if state_path is None:
                         time.sleep(0.05)
@@ -219,6 +227,11 @@ def run_case(monkeypatch, *, cancel):
         )
         config_path = output / "mcp.toml"
         config_path.write_text(
+            '[robot]\nid = "go2-vln-test"\ntype = "unitree.go2"\n'
+            'environment = "simulation"\nadapter = "unitree"\n'
+            '[capabilities.visual_navigation]\ndescription = "Visual navigation"\n'
+            'tools = ["vln.run_vln_navigation"]\n'
+            'checks = { "vln.get_vln_readiness" = { ready = true } }\n'
             "[mcp_servers.vln]\n"
             'transport = "stdio"\n'
             f"command = {json.dumps(sys.executable)}\n"
@@ -230,8 +243,6 @@ def run_case(monkeypatch, *, cancel):
         with OfflinePlannerServer(script) as planner:
             config = {
                 "RPENT_VENV_DIR": str(PROJECT / ".venv"),
-                "RPENT_MCP_CONFIG": str(config_path),
-                "RPENT_RUNS_DIR": str(output / "runs"),
                 "RPENT_MODEL": f"openai-chat:{OFFLINE_MODEL_NAME}",
                 "RPENT_MEMORY_DIR": str(output / "memory"),
                 "RPENT_MAX_TURNS": "5",
@@ -242,18 +253,19 @@ def run_case(monkeypatch, *, cancel):
                 "no_proxy": "127.0.0.1,localhost",
                 "PYDANTIC_AI_NO_BANNER": "1",
             }
-            config_path = output / "test.env"
-            config_path.write_text(
+            env_path = output / "test.env"
+            env_path.write_text(
                 "".join(
                     f"export {key}={shlex.quote(value)}\n"
                     for key, value in config.items()
                 )
             )
-            config_path.chmod(0o600)
-            monkeypatch.setenv("RPENT_CONFIG_FILE", str(config_path))
-            with task_api(output / "jobs") as endpoint:
+            env_path.chmod(0o600)
+            monkeypatch.setenv("RPENT_CONFIG_FILE", str(env_path))
+            with task_api(output / "jobs", config_path) as endpoint:
                 job, samples = run_task(endpoint, output, cancel=cancel, origin=origin)
-                vln = job["navigation"]["vln"]
+                assert job["evidence"]["navigation"] == job["navigation"]
+                vln = job["evidence"]["navigation"]["vln"]
                 assert job["status"] == ("stopped" if cancel else "succeeded"), job
                 assert vln["predictions"] >= 1 and vln["accepted_references"] >= 1
                 assert vln["stop_confirmed"] and vln["active_control_id"] is None

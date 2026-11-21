@@ -34,6 +34,7 @@ EXPECTED_ROBOTS = (
     "dual_franka",
     "franka",
     "libero",
+    "mcp",
     "robocasa",
     "robodojo",
     "robotwin",
@@ -41,9 +42,12 @@ EXPECTED_ROBOTS = (
     "yam",
 )
 
-EXPECTED_DASHBOARD_ROBOTS = tuple(name for name in EXPECTED_ROBOTS if name != "unitree")
+EXPECTED_DASHBOARD_ROBOTS = tuple(
+    name for name in EXPECTED_ROBOTS if name not in {"mcp", "unitree"}
+)
 
 PROMPT_VARIABLES = {
+    "mcp": {"task": "Read the arm's status"},
     "unitree": {"task": "让机器狗往前走", "env_endpoint": "http://127.0.0.1:8115"},
     "yam": {
         "task_id": 1,

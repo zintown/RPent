@@ -38,6 +38,7 @@ bash run_rpent.sh '前往厕所通道并确认到达'
 | A* `plan_route` | 输入起点 `{x,y,yaw}` 和一个目标名称、编号或地图坐标，返回 `plan_id` 和路径摘要。 |
 | A* `get_plan` | 按 `plan_id` 读取原始规划 JSON。MuJoCo MCP 用它传递完整路径。 |
 | MuJoCo `get_pose` | 返回实时地图位姿。 |
+| MuJoCo `get_navigation_status` | 检查控制器空闲状态和 A* 地图版本，供任务 MCP 查询地图导航能力。 |
 | MuJoCo `follow_plan` | 输入 `plan_id`，成功时返回行走编号、最终位姿和到达证据。 |
 | MuJoCo `get_walk_status` | 返回当前或最近一次行走的状态。 |
 
