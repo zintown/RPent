@@ -14,9 +14,8 @@ bash run_rpent.sh '查询 Go2 当前位姿'
 | A* | [mcp/astar/server.py](mcp/astar/server.py) | [地图规划](MUJOCO_USAGE.zh-CN.md) |
 | MuJoCo | [mcp/mujoco/server.py](mcp/mujoco/server.py) | [仿真执行](MUJOCO_USAGE.zh-CN.md) |
 | LightNav | [mcp/vln/server.py](mcp/vln/server.py) | [视觉导航](VLN_USAGE.zh-CN.md) |
-| Go2 真机 | [mcp/real/server.py](mcp/real/server.py) | [真机接入](REAL_USAGE.zh-CN.md)、[A* 短路线测试](REAL_TEST_PLAN.zh-CN.md) |
 | 任务调度 | [rpent.mcp.task.server](../../rpent/mcp/task/server.py) | [DSH 接入](TASK_MCP.zh-CN.md) |
 
-A* 和 MuJoCo 转接服务使用 Streamable HTTP。LightNav 和 Go2 真机转接程序使用 stdio，由 RPent 为每条任务启动。它们各自连接已运行的推理、仿真或真机通信进程。
+A* 和 MuJoCo 转接服务使用 Streamable HTTP。LightNav 转接程序使用 stdio，由 RPent 为每条任务启动。
 
 直接运行 RPent CLI 并启用上述 stdio 配置时，将 `RPENT_TASK_OUTPUT_DIR` 设为 `--output-dir` 对应的绝对路径。使用 `run_rpent.sh` 时脚本会自动设置。

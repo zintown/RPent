@@ -53,7 +53,7 @@ def _map_evidence(transcript: dict[str, Any]) -> dict[str, Any]:
 
 
 def read_evidence(output: Path, transcript: dict[str, Any]) -> TaskEvidence:
-    """Collect route, VLN and physical-control evidence from the finished run."""
+    """Collect route and VLN evidence from the finished run."""
     navigation = _map_evidence(transcript)
     state, state_time = _read(output / "states.json")
     steps = state.get("steps", [])
@@ -88,19 +88,13 @@ def read_evidence(output: Path, transcript: dict[str, Any]) -> TaskEvidence:
             stop_error=vln.get("stop_error"),
             pose=vln.get("pose") or navigation.get("pose"),
         )
-    real, _ = _read(output / "real" / "latest.json")
-    if real:
-        navigation["real_robot"] = real
-
-    stop_error = navigation.get("stop_error") or real.get("stop_error")
+    stop_error = navigation.get("stop_error")
     return TaskEvidence(
         data={"navigation": navigation} if navigation else {},
         requires_attention=bool(
             navigation.get("active_walk_id")
             or navigation.get("active_control_id")
             or navigation.get("submission_uncertain")
-            or real.get("active_request_id")
-            or real.get("submission_uncertain")
             or stop_error
         ),
         verification_required=(
@@ -109,8 +103,7 @@ def read_evidence(output: Path, transcript: dict[str, Any]) -> TaskEvidence:
             and not vln.get("error")
         ),
         error=(
-            real.get("error")
-            or vln.get("error")
+            vln.get("error")
             or ("VLN navigation failed" if vln.get("state") == "failed" else None)
         ),
         stop_error=stop_error,

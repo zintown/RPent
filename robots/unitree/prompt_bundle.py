@@ -40,13 +40,6 @@ only when a standing pose for the visual target is known from the task or waypoi
 For visual arrival, require goal_verified and stop_confirmed. For verification_required,
 finish stuck and report what was observed. Query get_vln_status for progress or errors.
 
-For a physical Go2, use get_robot_status for the assigned robot. Use move_relative
-only for an explicitly requested body-frame move, with x forward and y left in meters
-and arrival_turn_deg positive to the left. An explicit stop uses stop_robot. Capture
-returns file paths and metadata, and get_robot_request reads a previous request result.
-Require completed motion with stopping evidence before reporting a move as successful.
-Absolute map navigation requires a configured map pose and route-following service.
-
 Execute movements sequentially. On failure or uncertainty, query status and report the
 remaining work without repeating the movement. Every task ends with finish. Report
 success only with evidence for every requested action. For query tasks put the answer in

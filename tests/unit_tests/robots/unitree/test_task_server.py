@@ -52,12 +52,6 @@ navigation = {
     "stop_error": None,
 }
 (output / "states.json").write_text(json.dumps({"steps": [{"state": navigation}]}))
-if mode == "real-unresolved":
-    (output / "real").mkdir()
-    (output / "real/latest.json").write_text(json.dumps({
-        "backend": "real", "active_request_id": "real-request-1",
-        "stop_error": "stop confirmation unavailable",
-    }))
 if mode in ("wait", "force"):
     def stop(sig, frame):
         print("SIGINT cleanup completed", flush=True)
@@ -143,18 +137,6 @@ class TaskServerTest(unittest.TestCase):
                     self.assertEqual(result["exit_code"], 7)
                     self.assertIn("7", result["error"])
                 runner.close()
-
-    def test_unconfirmed_real_motion_blocks_later_tasks(self):
-        os.environ["RPENT_TEST_MODE"] = "real-unresolved"
-        runner = self.runner()
-        result = runner.wait(runner.start("test"), 6)
-        self.assertEqual(result["status"], "requires_attention")
-        self.assertEqual(result["error"], "stop confirmation unavailable")
-        self.assertEqual(
-            result["navigation"]["real_robot"]["active_request_id"], "real-request-1"
-        )
-        with self.assertRaises(TaskConflict):
-            runner.start("next")
 
     def test_runner_uses_the_existing_launch_script(self):
         repo = Path(__file__).resolve().parents[4]

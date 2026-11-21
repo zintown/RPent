@@ -17,12 +17,12 @@
 from robots.unitree.robot_spec import get_robot_spec
 
 
-def test_prompt_guides_map_visual_and_physical_mcp_tools():
+def test_prompt_guides_map_and_visual_mcp_tools():
     prompts = get_robot_spec().prompts
     system = prompts.render("system", variables={})
-    for name in ("plan_route", "follow_plan", "run_vln_navigation", "move_relative"):
+    for name in ("plan_route", "follow_plan", "run_vln_navigation"):
         assert name in system
     assert "verification_required" in system
-    assert "body-frame" in system
+    assert "stop_confirmed" in system
     user = prompts.render("user", variables={"task": "前往客厅"})
     assert "前往客厅" in user

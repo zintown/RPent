@@ -25,7 +25,6 @@ if [[ $# -eq 1 && "$1" == '--help' ]]; then
   RPENT_MEMORY_DIR                可选独立本地记忆目录
 
 仿真说明：robots/unitree/MUJOCO_USAGE.zh-CN.md。
-真机说明：robots/unitree/REAL_USAGE.zh-CN.md。
 HELP
     exit 0
 fi

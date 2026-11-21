@@ -20,7 +20,7 @@ export RPENT_VENV_DIR="$(cd .. && pwd)/.venv"
   --jobs-dir output/task-mcp/jobs
 ```
 
-私有 `.env.local` 配置模型凭据和 `RPENT_RUNNER_TOKEN`。本机连接可将监听地址设为 `127.0.0.1`。仿真、LightNav 和真机使用各自的 MCP 配置。 [仿真](MUJOCO_USAGE.zh-CN.md) · [LightNav](VLN_USAGE.zh-CN.md) · [真机](REAL_USAGE.zh-CN.md)
+私有 `.env.local` 配置模型凭据和 `RPENT_RUNNER_TOKEN`。本机连接可将监听地址设为 `127.0.0.1`。 [仿真](MUJOCO_USAGE.zh-CN.md) · [LightNav](VLN_USAGE.zh-CN.md)
 
 `python -m robots.unitree.mcp.task.server` 也可以启动通用服务。原来只包含 `[mcp_servers]` 的配置可继续使用这个入口。为 DSH 提供环境与能力信息时，按以上各部署文档补充相应配置表。
 
@@ -34,7 +34,7 @@ export RPENT_VENV_DIR="$(cd .. && pwd)/.venv"
 {"instruction": "查询仿真 Go2 的当前位置，并报告位姿"}
 ```
 
-Unitree 的导航、VLN 和真机控制证据通过 `evidence.navigation` 返回，原调用方仍可读取 `navigation` 字段。`succeeded` 表示执行成功。`verification_required` 表示仍需验收，`requires_attention` 表示需要核对现场或控制状态。`output_dir` 位于 RPent 主机。
+Unitree 的导航和 VLN 证据通过 `evidence.navigation` 返回，原调用方仍可读取 `navigation` 字段。`succeeded` 表示执行成功。`verification_required` 表示仍需验收，`requires_attention` 表示需要核对仿真控制状态。`output_dir` 位于 RPent 主机。
 
 同一服务同时执行一条指令。每次调用都会启动一次新执行。客户端通过 MCP 取消正在运行的调用时，RPent 会清理对应进程。`GET /healthz` 可检查 `busy` 和 `requires_attention`。
 
