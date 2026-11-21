@@ -26,25 +26,23 @@ from pathlib import Path
 from unittest.mock import patch
 
 from robots.unitree.mcp.task.runner import (
-    RunRequest,
     TaskConflict,
     TaskRunner,
 )
 from robots.unitree.mcp.task.server import main
 
 CHILD = r"""
-import hashlib
 import json
 import os
 import signal
 import sys
 import time
 from pathlib import Path
+from tempfile import mkdtemp
 
 root = Path.cwd()
 mode = os.environ.get("RPENT_TEST_MODE", "success")
-output = root / "outputs" / hashlib.sha256(sys.argv[1].encode()).hexdigest()
-output.mkdir(parents=True)
+output = Path(mkdtemp(prefix="output-", dir=root))
 print("RPent output: " + str(output.relative_to(root)), flush=True)
 with (root / "launches.jsonl").open("a") as handle:
     handle.write(json.dumps({"args": sys.argv[1:], "tty": sys.stdin.isatty()}) + "\n")
@@ -103,15 +101,6 @@ class TaskServerTest(unittest.TestCase):
         self.addCleanup(runner.close)
         return runner
 
-    def wait_finished(self, runner, task_id="parent-1"):
-        deadline = time.monotonic() + 6
-        while time.monotonic() < deadline:
-            result = runner.get(task_id)
-            if result["status"] not in {"starting", "running", "stopping"}:
-                return result
-            time.sleep(0.01)
-        self.fail("owned child did not finish")
-
     def wait_ready(self):
         deadline = time.monotonic() + 4
         while time.monotonic() < deadline:
@@ -123,11 +112,7 @@ class TaskServerTest(unittest.TestCase):
     def test_real_child_has_tty_literal_arguments_and_success_artifacts(self):
         runner = self.runner()
         text = '去广告牌 "quoted"; $(touch injected); `touch injected2`\n再去母婴室'
-        request = RunRequest(task_id="parent-1", task_name=text)
-        started, created = runner.start(request)
-        self.assertTrue(created)
-        self.assertEqual(started["status"], "running")
-        result = self.wait_finished(runner)
+        result = runner.wait(runner.start(text), 6)
         self.assertEqual(result["status"], "succeeded")
         self.assertEqual(result["exit_code"], 0)
         self.assertEqual(result["navigation"]["completed_navigation_goals"], 3)
@@ -135,18 +120,9 @@ class TaskServerTest(unittest.TestCase):
         self.assertEqual(result["stats"]["turns_used"], 9)
         launch = json.loads((self.root / "launches.jsonl").read_text())
         self.assertTrue(launch["tty"])
-        self.assertEqual(launch["args"], ["parent-1", text])
+        self.assertEqual(launch["args"], [text])
         self.assertFalse((self.root / "injected").exists())
         self.assertFalse((self.root / "injected2").exists())
-        self.assertEqual(runner.start(request), (result, False))
-        with self.assertRaises(TaskConflict):
-            runner.start(RunRequest(task_id="parent-1", task_name="different"))
-        runner.close()
-        restored = self.runner()
-        self.assertEqual(restored.start(request), (result, False))
-        self.assertEqual(
-            len((self.root / "launches.jsonl").read_text().splitlines()), 1
-        )
 
     def test_exit_code_zero_is_not_automatically_success(self):
         for mode, expected in (
@@ -159,27 +135,24 @@ class TaskServerTest(unittest.TestCase):
             with self.subTest(mode=mode):
                 os.environ["RPENT_TEST_MODE"] = mode
                 runner = self.runner()
-                task_id = "parent-" + mode
-                runner.start(RunRequest(task_id=task_id, task_name="test"))
-                result = self.wait_finished(runner, task_id)
+                result = runner.wait(runner.start("test"), 6)
                 self.assertEqual(result["status"], expected)
                 if mode == "crash":
                     self.assertEqual(result["exit_code"], 7)
-                    self.assertIn("7", runner.get(task_id)["error"])
+                    self.assertIn("7", result["error"])
                 runner.close()
 
     def test_unconfirmed_real_motion_blocks_later_tasks(self):
         os.environ["RPENT_TEST_MODE"] = "real-unresolved"
         runner = self.runner()
-        runner.start(RunRequest(task_id="parent-1", task_name="test"))
-        result = self.wait_finished(runner)
+        result = runner.wait(runner.start("test"), 6)
         self.assertEqual(result["status"], "requires_attention")
         self.assertEqual(result["error"], "stop confirmation unavailable")
         self.assertEqual(
             result["navigation"]["real_robot"]["active_request_id"], "real-request-1"
         )
         with self.assertRaises(TaskConflict):
-            runner.start(RunRequest(task_id="next-real", task_name="test"))
+            runner.start("next")
 
     def test_runner_uses_the_existing_launch_script(self):
         repo = Path(__file__).resolve().parents[4]
@@ -191,8 +164,6 @@ class TaskServerTest(unittest.TestCase):
             + r"""
 import argparse, json, os, sys
 from pathlib import Path
-if sys.argv[1] == "-c":
-    os.execv(sys.executable, [sys.executable, *sys.argv[1:]])
 assert sys.stdin.isatty()
 assert sys.argv[1:3] == ["-m", "rpent.cli.main"]
 parser = argparse.ArgumentParser()
@@ -218,8 +189,7 @@ Path("actual-args.json").write_text(json.dumps(vars(args)))
         ):
             runner = self.runner()
             text = '先去广告牌；保留 "引号" 和空格'
-            runner.start(RunRequest(task_id="parent-1", task_name=text))
-            result = self.wait_finished(runner)
+            result = runner.wait(runner.start(text), 6)
         self.assertEqual(result["status"], "succeeded")
         args = json.loads((self.root / "actual-args.json").read_text())
         self.assertEqual(args["task"], text)
@@ -228,34 +198,30 @@ Path("actual-args.json").write_text(json.dumps(vars(args)))
     def test_only_one_child_and_stop_uses_graceful_sigint(self):
         os.environ["RPENT_TEST_MODE"] = "wait"
         runner = self.runner()
-        request = RunRequest(task_id="parent-1", task_name="test")
-        started, _ = runner.start(request)
+        job = runner.start("wait for cancellation")
         self.wait_ready()
-        existing, created = runner.start(request)
-        self.assertFalse(created)
-        self.assertEqual(existing["pid"], started["pid"])
         with self.assertRaises(TaskConflict):
-            runner.start(RunRequest(task_id="parent-2", task_name="test"))
+            runner.start("second instruction")
         self.assertTrue(runner.health()["busy"])
-        self.assertEqual(runner.stop("parent-1")["status"], "stopping")
-        result = self.wait_finished(runner)
+        runner.cancel(job)
+        result = runner.wait(job, 6)
         self.assertEqual(result["status"], "stopped")
         self.assertFalse(result["forced_stop"])
-        self.assertIn("SIGINT cleanup completed", runner.logs("parent-1"))
-        self.assertEqual(runner.stop("parent-1"), result)
+        self.assertIn("SIGINT cleanup completed", Path(result["log_file"]).read_text())
+        runner.cancel(job)
         self.assertFalse(runner.health()["busy"])
         os.environ["RPENT_TEST_MODE"] = "success"
-        runner.start(RunRequest(task_id="parent-2", task_name="test"))
-        self.assertEqual(self.wait_finished(runner, "parent-2")["status"], "succeeded")
+        self.assertEqual(
+            runner.wait(runner.start("next instruction"), 6)["status"], "succeeded"
+        )
 
-    def test_progress_uses_newest_state_or_cleanup_report(self):
+    def test_final_result_uses_newest_state_or_cleanup_report(self):
         os.environ["RPENT_TEST_MODE"] = "wait"
         runner = self.runner()
-        runner.start(RunRequest(task_id="parent-1", task_name="test"))
+        job = runner.start("test")
         self.wait_ready()
-        output = Path(runner.get("parent-1")["output_dir"])
+        [output] = self.root.glob("output-*")
         state_path = output / "states.json"
-        state = json.loads(state_path.read_text())
         state_time = state_path.stat().st_mtime_ns
         report_path = output / "navigation" / "walks" / "latest.json"
         report_path.parent.mkdir(parents=True)
@@ -263,75 +229,60 @@ Path("actual-args.json").write_text(json.dumps(vars(args)))
             json.dumps({"completed_navigation_goals": 4, "error": None})
         )
         os.utime(report_path, ns=(state_time + 1, state_time + 1))
-        navigation = runner.get("parent-1")["navigation"]
-        self.assertEqual(navigation["completed_navigation_goals"], 4)
-        state["steps"][-1]["state"].update(
-            completed_navigation_goals=5, error="new error"
+        runner.cancel(job)
+        self.assertEqual(
+            runner.wait(job, 6)["navigation"]["completed_navigation_goals"], 4
         )
-        state_path.write_text(json.dumps(state))
-        os.utime(state_path, ns=(state_time + 2, state_time + 2))
-        navigation = runner.get("parent-1")["navigation"]
-        self.assertEqual(navigation["completed_navigation_goals"], 5)
-        self.assertEqual(navigation["error"], "new error")
-        runner.stop("parent-1")
-        self.wait_finished(runner)
 
     def test_forced_stop_requires_attention_and_blocks_new_motion(self):
         os.environ["RPENT_TEST_MODE"] = "force"
         runner = self.runner(stop_timeout_s=0.1)
-        runner.start(RunRequest(task_id="parent-1", task_name="test"))
+        job = runner.start("test")
         self.wait_ready()
-        runner.stop("parent-1")
-        result = self.wait_finished(runner)
+        runner.cancel(job)
+        result = runner.wait(job, 6)
         self.assertEqual(result["status"], "requires_attention")
         self.assertTrue(result["forced_stop"])
         with self.assertRaises(TaskConflict):
-            runner.start(RunRequest(task_id="parent-2", task_name="test"))
+            runner.start("next")
 
     def test_shutdown_drains_owned_child_and_releases_lease(self):
         os.environ["RPENT_TEST_MODE"] = "wait"
         runner = self.runner()
-        runner.start(RunRequest(task_id="parent-1", task_name="test"))
+        job = runner.start("test")
         self.wait_ready()
         with self.assertRaises(BlockingIOError):
             TaskRunner(self.root, self.jobs)
         runner.close()
-        self.assertEqual(runner.get("parent-1")["status"], "stopped")
+        self.assertEqual(runner.wait(job, 6)["status"], "stopped")
         restored = self.runner()
-        self.assertEqual(restored.get("parent-1")["status"], "stopped")
+        self.assertFalse(restored.health()["requires_attention"])
 
-    def test_interrupted_persistent_id_is_not_replayed(self):
-        os.environ["RPENT_TEST_MODE"] = "wait"
+    def test_interrupted_legacy_record_still_blocks_new_motion(self):
+        old = self.jobs / "previous"
+        old.mkdir(parents=True)
+        path = old / "job.json"
+        path.write_text(
+            json.dumps({"task_id": "previous", "task_name": "old", "status": "running"})
+        )
+        restored = self.runner()
+        self.assertEqual(json.loads(path.read_text())["status"], "interrupted")
+        with self.assertRaises(TaskConflict):
+            restored.start("test")
+        self.assertTrue(restored.health()["requires_attention"])
+        self.assertFalse((self.root / "launches.jsonl").exists())
+
+    def test_failed_launch_is_recorded_and_releases_runner(self):
         runner = self.runner()
-        request = RunRequest(task_id="parent-1", task_name="test")
-        runner.start(request)
-        self.wait_ready()
-        runner.close()
+        with patch("subprocess.Popen", side_effect=OSError("test launch failure")):
+            with self.assertRaisesRegex(OSError, "test launch failure"):
+                runner.start("go")
         path = next(self.jobs.glob("*/job.json"))
         record = json.loads(path.read_text())
-        record["status"] = "running"
-        path.write_text(json.dumps(record))
-        restored = self.runner()
-        result, created = restored.start(request)
-        self.assertFalse(created)
-        self.assertEqual(result["status"], "interrupted")
-        with self.assertRaises(TaskConflict):
-            restored.start(RunRequest(task_id="parent-2", task_name="test"))
-        self.assertEqual(restored.health()["attention_task_ids"], ["parent-1"])
-
-    def test_failed_launch_is_recorded_and_not_retried_with_the_same_id(self):
-        runner = self.runner()
-        request = RunRequest(task_id="task-1", task_name="go")
-        with patch(
-            "subprocess.Popen", side_effect=OSError("test launch failure")
-        ) as spawn:
-            with self.assertRaisesRegex(OSError, "test launch failure"):
-                runner.start(request)
-            record, created = runner.start(request)
-        self.assertFalse(created)
         self.assertEqual(record["status"], "failed")
         self.assertEqual(record["error"], "test launch failure")
-        spawn.assert_called_once()
+        self.assertFalse(runner.health()["busy"])
+        self.assertEqual(runner.wait(runner.start("next"), 6)["status"], "succeeded")
 
     def test_public_binding_requires_server_side_token(self):
         with patch.dict(os.environ, {"RPENT_RUNNER_TOKEN": ""}):

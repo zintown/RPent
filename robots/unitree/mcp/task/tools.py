@@ -4,22 +4,32 @@
 # You may obtain a copy of the License at
 # https://www.apache.org/licenses/LICENSE-2.0
 
-"""MCP tools for submitting and monitoring Unitree tasks."""
+"""Expose natural-language task execution as a discoverable MCP tool."""
 
 from __future__ import annotations
 
-import asyncio
 import re
-import time
 from collections.abc import Callable
 from typing import Annotated, Any
 
+from anyio import CancelScope, get_cancelled_exc_class, to_thread
+from anyio.lowlevel import checkpoint
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
-from mcp.types import ToolAnnotations
-from pydantic import Field
+from pydantic import BaseModel, Field
 
-from robots.unitree.mcp.task.runner import ACTIVE_STATUSES, RunRequest, TaskRunner
+from robots.unitree.mcp.task.runner import TaskRunner
+
+
+class TaskResult(BaseModel):
+    """Terminal task result and available execution evidence."""
+
+    robot_id: str
+    status: str
+    summary: str | None
+    error: str | None
+    output_dir: str | None
+    navigation: dict[str, Any] | None
 
 
 def create_task_mcp(
@@ -28,11 +38,11 @@ def create_task_mcp(
     robot_id: str,
     allowed_hosts: list[str] | None = None,
 ) -> FastMCP:
-    """Expose one configured robot; callers retain IDs across reconnects and retries.
+    """Build an MCP server with one complete task call for its configured robot.
 
     Args:
-        get_runner: Accessor for the runner owned by the enclosing HTTP lifespan.
-        robot_id: Stable robot identity advertised to the dispatcher.
+        get_runner: Accessor for the runner owned by the HTTP lifespan.
+        robot_id: Identity of the robot bound to this endpoint.
         allowed_hosts: Additional trusted Host headers for private-network access.
 
     Returns:
@@ -53,97 +63,43 @@ def create_task_mcp(
     server = FastMCP(
         "rpent-tasks",
         instructions=(
-            "Delegate complete robot tasks through submit_robot_task, then query or "
-            "wait for their recorded results. An accepted task is still running. "
-            "Reuse the same task_id and exact task text after a lost acknowledgement; "
-            "query an uncertain outcome before dispatching replacement motion. "
-            "A tool timeout or disconnection does not stop a robot task. "
-            "Use stop_robot_task and check the final status. requires_attention and "
-            "interrupted require reconciliation before another task can run. "
-            "Only succeeded with supporting execution evidence means success."
+            f"Use run_task to execute a complete instruction on {robot_id}. "
+            "Preserve the requested action, order, and acceptance criteria. "
+            "The tool returns the terminal status. Use its summary and execution "
+            "evidence to report the outcome. Treat each call as a new execution. "
+            "Check the robot after an uncertain outcome before submitting more motion."
         ),
-        streamable_http_path="/",
-        stateless_http=True,
         json_response=True,
         transport_security=security,
     )
-    readonly = ToolAnnotations(readOnlyHint=True, destructiveHint=False)
 
-    def runner_for(requested: str) -> TaskRunner:
-        if requested != robot_id:
-            raise ValueError(
-                f"unknown robot_id: {requested}; configured robot: {robot_id}"
-            )
-        return get_runner()
-
-    @server.tool(annotations=readonly)
-    async def list_robots() -> dict[str, Any]:
-        """List this endpoint's robot and runner availability, including blocked IDs."""
+    @server.tool(
+        description=(
+            f"Execute one natural-language task on {robot_id} and return its final status. "
+            "Pass the complete task text in instruction. Each call starts a new execution."
+        )
+    )
+    async def run_task(
+        instruction: Annotated[str, Field(min_length=1, max_length=20000)],
+    ) -> TaskResult:
         runner = get_runner()
-        health = await asyncio.to_thread(runner.health)
-        return {
-            "robots": [
-                {
-                    "robot_id": robot_id,
-                    **health,
-                }
-            ]
-        }
+        await checkpoint()
+        with CancelScope(shield=True):
+            job = await to_thread.run_sync(runner.start, instruction)
+        try:
+            record = await to_thread.run_sync(runner.wait, job, abandon_on_cancel=True)
+        except get_cancelled_exc_class():
+            with CancelScope(shield=True):
+                await to_thread.run_sync(runner.cancel, job)
+            raise
 
-    @server.tool(annotations=ToolAnnotations(idempotentHint=True))
-    async def submit_robot_task(
-        robot_id: str, task_id: str, task_name: str
-    ) -> dict[str, Any]:
-        """Start one complete task and return immediately with its persistent record.
-
-        Args:
-            robot_id: Exact identity returned by list_robots.
-            task_id: Stable execution ID. Reuse it for the same submission only.
-            task_name: Complete natural-language instruction, including acceptance.
-
-        Returns:
-            created and task; created=false means this ID already owns the same task.
-        """
-        runner = runner_for(robot_id)
-        request = RunRequest(task_id=task_id, task_name=task_name)
-        record, created = await asyncio.to_thread(runner.start, request)
-        return {"robot_id": robot_id, "created": created, "task": record}
-
-    @server.tool(annotations=readonly)
-    async def get_robot_task(robot_id: str, task_id: str) -> dict[str, Any]:
-        """Read a recorded task, its business outcome, and available navigation evidence."""
-        return await asyncio.to_thread(runner_for(robot_id).get, task_id)
-
-    @server.tool(annotations=readonly)
-    async def wait_robot_task(
-        robot_id: str,
-        task_id: str,
-        timeout_s: Annotated[float, Field(ge=0, le=30, allow_inf_nan=False)] = 10,
-    ) -> dict[str, Any]:
-        """Wait up to 30 seconds for a terminal state; timing out leaves the task running."""
-        runner = runner_for(robot_id)
-        deadline = time.monotonic() + timeout_s
-        while True:
-            record = await asyncio.to_thread(runner.get, task_id)
-            terminal = record["status"] not in ACTIVE_STATUSES
-            remaining = deadline - time.monotonic()
-            if terminal or remaining <= 0:
-                return {"task": record, "terminal": terminal}
-            await asyncio.sleep(min(0.25, remaining))
-
-    @server.tool(annotations=readonly)
-    async def get_robot_logs(
-        robot_id: str,
-        task_id: str,
-        tail_bytes: Annotated[int, Field(ge=1, le=65536)] = 16384,
-    ) -> dict[str, Any]:
-        """Read a bounded task log tail; logs are diagnostic evidence, not completion."""
-        text = await asyncio.to_thread(runner_for(robot_id).logs, task_id, tail_bytes)
-        return {"task_id": task_id, "text": text}
-
-    @server.tool(annotations=ToolAnnotations(idempotentHint=True))
-    async def stop_robot_task(robot_id: str, task_id: str) -> dict[str, Any]:
-        """Request owned-task cleanup; query until stopped or requires_attention."""
-        return await asyncio.to_thread(runner_for(robot_id).stop, task_id)
+        return TaskResult(
+            robot_id=robot_id,
+            status=record["status"],
+            summary=(record["finish"] or {}).get("summary"),
+            error=record["error"],
+            output_dir=record["output_dir"],
+            navigation=record["navigation"],
+        )
 
     return server

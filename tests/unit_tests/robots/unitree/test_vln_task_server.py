@@ -21,7 +21,7 @@ import sys
 import time
 from pathlib import Path
 
-from robots.unitree.mcp.task.runner import RunRequest, TaskRunner
+from robots.unitree.mcp.task.runner import TaskRunner
 
 CHILD = r"""
 import json, time
@@ -63,16 +63,6 @@ def wait_path(path: Path) -> None:
         time.sleep(0.01)
 
 
-def finish(runner: TaskRunner) -> dict:
-    end = time.monotonic() + 5
-    while time.monotonic() < end:
-        result = runner.get("task-1")
-        if result["status"] not in {"starting", "running", "stopping"}:
-            return result
-        time.sleep(0.01)
-    raise AssertionError("test child did not finish")
-
-
 def make_runner(tmp_path: Path) -> TaskRunner:
     (tmp_path / "child.py").write_text(CHILD)
     (tmp_path / "run_rpent.sh").write_text(
@@ -86,17 +76,15 @@ def test_live_vln_progress_clears_uncertain_acceptance_and_preserves_verificatio
 ):
     runner = make_runner(tmp_path)
     try:
-        runner.start(RunRequest(task_id="task-1", task_name="VLN test"))
+        job = runner.start("VLN test")
         wait_path(tmp_path / "first-ready")
-        assert runner.get("task-1")["navigation"]["submission_uncertain"]
+        assert runner.health()["busy"]
         (tmp_path / "continue").touch()
         wait_path(tmp_path / "second-ready")
-        snapshot = runner.get("task-1")["navigation"]
-        assert not snapshot["submission_uncertain"]
-        assert snapshot["active_control_id"] == "control_1"
-        assert snapshot["vln"]["predictions"] == 3
         (tmp_path / "finish").touch()
-        result = finish(runner)
+        result = runner.wait(job, 5)
+        assert not result["navigation"]["submission_uncertain"]
+        assert result["navigation"]["active_control_id"] is None
         assert result["status"] == "verification_required"
         assert result["navigation"]["vln"]["stop_confirmed"]
     finally:
@@ -107,11 +95,11 @@ def test_child_exit_with_an_active_trajectory_lease_requires_reconciliation(tmp_
     (tmp_path / "leave-active").touch()
     runner = make_runner(tmp_path)
     try:
-        runner.start(RunRequest(task_id="task-1", task_name="VLN test"))
+        job = runner.start("VLN test")
         wait_path(tmp_path / "first-ready")
         (tmp_path / "continue").touch()
         wait_path(tmp_path / "second-ready")
         (tmp_path / "finish").touch()
-        assert finish(runner)["status"] == "requires_attention"
+        assert runner.wait(job, 5)["status"] == "requires_attention"
     finally:
         runner.close()

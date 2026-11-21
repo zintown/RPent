@@ -43,8 +43,6 @@ import json
 import os
 import sys
 from pathlib import Path
-if sys.argv[1] == "-c":
-    os.execv(sys.executable, [sys.executable, *sys.argv[1:]])
 if "LAUNCH_TEST_EXPECTED_KEY" in os.environ:
     assert os.environ.get("OPENAI_API_KEY") == os.environ["LAUNCH_TEST_EXPECTED_KEY"], "config key was not exported"
 out = sys.argv[sys.argv.index("--output-dir") + 1]
@@ -76,12 +74,12 @@ Path(os.environ["LAUNCH_TEST_ARGS"]).write_text(json.dumps(sys.argv[1:]))
             timeout=15,
         )
 
-    def test_two_arguments_preserve_literal_task_and_create_fresh_run(self):
+    def test_instruction_is_literal_and_each_execution_has_a_fresh_directory(self):
         marker = self.root / "must-not-exist"
         task = f'先去广告牌，确认到达后，再去厕所通道。\n不要执行 $(touch {marker}) `touch {marker}` "引号"'
         directories = []
         for _ in range(2):
-            result = self.launch("task-123", task)
+            result = self.launch(task)
             self.assertEqual(result.returncode, 0, result.stderr)
             args = json.loads((self.root / "args.json").read_text())
             self.assertEqual(args[:2], ["-m", "rpent.cli.main"])
@@ -96,7 +94,7 @@ Path(os.environ["LAUNCH_TEST_ARGS"]).write_text(json.dumps(sys.argv[1:]))
         self.assertFalse(marker.exists())
 
     def test_task_text_starting_with_dashes_stays_one_argument(self):
-        result = self.launch("task-123", "--max-turns 999 这是任务文本")
+        result = self.launch("--max-turns 999 这是任务文本")
         self.assertEqual(result.returncode, 0, result.stderr)
         args = json.loads((self.root / "args.json").read_text())
         parser = argparse.ArgumentParser()
@@ -107,7 +105,7 @@ Path(os.environ["LAUNCH_TEST_ARGS"]).write_text(json.dumps(sys.argv[1:]))
     def test_custom_mcp_config_is_passed_to_the_cli(self):
         config_path = self.root / "real services.toml"
         self.env["RPENT_MCP_CONFIG"] = str(config_path)
-        result = self.launch("go2-status", "查询在线状态")
+        result = self.launch("查询在线状态")
         self.assertEqual(result.returncode, 0, result.stderr)
         args = json.loads((self.root / "args.json").read_text())
         self.assertEqual(args[args.index("--mcp-config") + 1], str(config_path))
@@ -115,8 +113,8 @@ Path(os.environ["LAUNCH_TEST_ARGS"]).write_text(json.dumps(sys.argv[1:]))
         self.assertNotIn("--real-endpoint", args)
 
     def test_missing_arguments_fail_before_launch(self):
-        self.assertEqual(self.launch("task-only").returncode, 2)
-        self.assertEqual(self.launch("task", " ").returncode, 2)
+        self.assertEqual(self.launch().returncode, 2)
+        self.assertEqual(self.launch(" ").returncode, 2)
         self.assertFalse((self.root / "args.json").exists())
 
     def test_custom_config_exports_credentials_without_printing_them(self):
@@ -127,7 +125,7 @@ Path(os.environ["LAUNCH_TEST_ARGS"]).write_text(json.dumps(sys.argv[1:]))
         )
         self.env["OPENAI_API_KEY"] = "test-only-parent-key"
         self.env["LAUNCH_TEST_EXPECTED_KEY"] = key
-        result = self.launch("task-123", "去广告牌")
+        result = self.launch("去广告牌")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn(key, result.stdout + result.stderr)
         args = json.loads((self.root / "args.json").read_text())
@@ -145,7 +143,7 @@ Path(os.environ["LAUNCH_TEST_ARGS"]).write_text(json.dumps(sys.argv[1:]))
         (repo / ".env.local").write_text(f"export OPENAI_API_KEY='{key}'\n")
         self.env.pop("RPENT_CONFIG_FILE")
         self.env["LAUNCH_TEST_EXPECTED_KEY"] = key
-        result = self.launch("task-123", "去广告牌", script=script)
+        result = self.launch("去广告牌", script=script)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn(key, result.stdout + result.stderr)
         args = json.loads((self.root / "args.json").read_text())
@@ -156,7 +154,7 @@ Path(os.environ["LAUNCH_TEST_ARGS"]).write_text(json.dumps(sys.argv[1:]))
 
     def test_missing_explicit_config_fails_before_launch(self):
         self.config.unlink()
-        result = self.launch("task-123", "去广告牌")
+        result = self.launch("去广告牌")
         self.assertEqual(result.returncode, 2)
         self.assertIn("configuration file not found", result.stderr)
         self.assertFalse((self.root / "args.json").exists())

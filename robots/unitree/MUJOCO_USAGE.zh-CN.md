@@ -27,7 +27,7 @@ RPent 通过 A* MCP 查询点位和规划路径，再把 `plan_id` 交给 MuJoCo
 
 ```bash
 export RPENT_VENV_DIR="$(cd .. && pwd)/.venv"
-bash run_rpent.sh "mcp-$(date -u +%Y%m%dT%H%M%SZ)" '前往厕所通道并确认到达'
+bash run_rpent.sh '前往厕所通道并确认到达'
 ```
 
 直接运行 CLI 时可用 `--mcp-config "$PWD/mcp.toml"`。DSH 通过 [RPent 任务 MCP](TASK_MCP.zh-CN.md)提交任务。为 RPent 增加其他 MCP 服务时，可在配置中加入对应的 `[mcp_servers.<服务名>]`，详见[规划器配置](../../docs/source-zh/rst_source/guides/configure_planner.rst)。

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Serve persistent Unitree tasks through Streamable HTTP MCP."""
+"""Serve Unitree task execution through Streamable HTTP MCP."""
 
 from __future__ import annotations
 
@@ -82,9 +82,11 @@ def create_app(
                 )
                 await response(scope, receive, send)
                 return
+        if scope["type"] == "http" and scope["path"].endswith("/mcp/"):
+            scope = {**scope, "path": scope["path"][:-1]}
         await mcp_app(scope, receive, send)
 
-    app.mount("/mcp", authorized_mcp)
+    app.mount("/", authorized_mcp)
     return app
 
 

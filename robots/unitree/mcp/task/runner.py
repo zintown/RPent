@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import copy
 import fcntl
-import hashlib
 import json
 import os
 import pty
@@ -29,9 +28,8 @@ import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from tempfile import mkdtemp
 from typing import Any
-
-from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from rpent.evaluation import write_json_atomic
 from rpent.utils.logging import get_logger
@@ -52,41 +50,8 @@ def _read_json(path: Path) -> dict[str, Any]:
     return value
 
 
-def validate_task_id(value: str) -> str:
-    """Check the stable identifier shared by the runner and its launcher."""
-    if (
-        not isinstance(value, str)
-        or not value
-        or value in {".", ".."}
-        or any(char.isspace() or ord(char) < 32 for char in value)
-        or any(char in value for char in ("/", "\\", "\x7f"))
-    ):
-        raise ValueError("task identifiers must be nonempty single path segments")
-    return value
-
-
-class RunRequest(BaseModel):
-    """Accept a stable task ID and a complete instruction."""
-
-    model_config = ConfigDict(extra="forbid", strict=True)
-    task_id: str = Field(min_length=1, max_length=256)
-    task_name: str = Field(min_length=1, max_length=20000)
-
-    @field_validator("task_id")
-    @classmethod
-    def valid_id(cls, value: str) -> str:
-        return validate_task_id(value)
-
-    @field_validator("task_name")
-    @classmethod
-    def nonblank_task(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("task_name must not be blank")
-        return value
-
-
 class TaskConflict(ValueError):
-    """A task cannot start without changing or duplicating an existing run."""
+    """The runner cannot accept a new instruction."""
 
 
 @dataclass
@@ -99,7 +64,7 @@ class _Job:
 
 
 class TaskRunner:
-    """Own one child at a time, its TTY, cancellation, and persistent task IDs.
+    """Own one task process at a time and persist its execution evidence.
 
     A filesystem lease prevents two services using the same job directory.
     Standalone CLI runs and services using other directories are outside this
@@ -118,7 +83,8 @@ class TaskRunner:
         self.jobs_dir = jobs_dir.resolve()
         self.jobs_dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
-        self._jobs: dict[str, _Job] = {}
+        self._active: _Job | None = None
+        self._requires_attention = False
         self._closed = False
         self._stop_timeout_s = stop_timeout_s
         self._lease = (self.jobs_dir / ".lock").open("a")
@@ -126,18 +92,14 @@ class TaskRunner:
             fcntl.flock(self._lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
             for path in sorted(self.jobs_dir.glob("*/job.json")):
                 record = _read_json(path)
-                task_id = validate_task_id(record["task_id"])
-                if task_id in self._jobs:
-                    raise ValueError(f"duplicate persisted task: {task_id}")
                 if record["status"] in ACTIVE_STATUSES:
                     record.update(
                         status="interrupted",
-                        error="service exited before the child result was recorded; verify the old process and simulator",
+                        error="service exited before recording the task result; verify the old process and equipment",
                     )
                     write_json_atomic(path, record)
-                job = _Job(record, path.parent)
-                job.done.set()
-                self._jobs[task_id] = job
+                if record["status"] in ATTENTION_STATUSES:
+                    self._requires_attention = True
         except BaseException:
             self._lease.close()
             raise
@@ -224,39 +186,25 @@ class TaskRunner:
             except (OSError, ValueError):
                 pass
 
-    def _snapshot(self, job: _Job) -> dict[str, Any]:
-        if job.record["status"] in ACTIVE_STATUSES:
-            self._refresh(job)
-        return copy.deepcopy(job.record)
-
-    def start(self, request: RunRequest) -> tuple[dict[str, Any], bool]:
-        """Start once per task ID; return the record and whether it is new."""
+    def start(self, instruction: str) -> _Job:
+        """Start a new instruction with an internally allocated run directory."""
+        if not instruction.strip():
+            raise ValueError("instruction must not be blank")
         with self._lock:
             if self._closed:
                 raise TaskConflict("service is shutting down")
-            existing = self._jobs.get(request.task_id)
-            if existing is not None:
-                if existing.record["task_name"] != request.task_name:
-                    raise TaskConflict("task_id already belongs to different task text")
-                return self._snapshot(existing), False
-            blocked = [
-                job.record["task_id"]
-                for job in self._jobs.values()
-                if job.record["status"] in ACTIVE_STATUSES | ATTENTION_STATUSES
-            ]
-            if blocked:
+            if self._active is not None:
+                raise TaskConflict("a task is already running or stopping")
+            if self._requires_attention:
                 raise TaskConflict(
-                    "runner is busy or needs reconciliation: " + ", ".join(blocked)
+                    "verify the previous task and equipment before starting another task"
                 )
-            directory = (
-                self.jobs_dir / hashlib.sha256(request.task_id.encode()).hexdigest()
-            )
-            directory.mkdir(exist_ok=True)
+            directory = Path(mkdtemp(prefix="run-", dir=self.jobs_dir))
             log_file = directory / "stdout.log"
             log_file.touch()
             job = _Job(
                 record={
-                    **request.model_dump(),
+                    "instruction": instruction,
                     "status": "starting",
                     "created_at": _now(),
                     "finished_at": None,
@@ -273,8 +221,7 @@ class TaskRunner:
                 },
                 directory=directory,
             )
-            self._jobs[request.task_id] = job
-            self._persist(job)  # Persist the ID before any possible execution.
+            self._persist(job)
             slave = None
             try:
                 job.terminal_fd, slave = pty.openpty()
@@ -284,8 +231,7 @@ class TaskRunner:
                         [
                             "bash",
                             str(self.repo_root / "run_rpent.sh"),
-                            request.task_id,
-                            request.task_name,
+                            instruction,
                         ],
                         cwd=self.repo_root,
                         env=environment,
@@ -305,11 +251,16 @@ class TaskRunner:
             finally:
                 if slave is not None:
                     os.close(slave)
+            self._active = job
             job.record.update(status="running", pid=job.process.pid)
             threading.Thread(target=self._watch, args=(job,), daemon=True).start()
-            self._persist(job)
-            logger.info("Started task %s (pid=%s)", request.task_id, job.process.pid)
-            return self._snapshot(job), True
+            try:
+                self._persist(job)
+            except OSError:
+                self._request_stop(job)
+                raise
+            logger.info("Started task in %s (pid=%s)", directory, job.process.pid)
+            return job
 
     def _watch(self, job: _Job) -> None:
         assert job.process is not None
@@ -357,7 +308,7 @@ class TaskRunner:
                     status = "succeeded"
                 elif re.search(
                     r"Request budget of \d+ reached\.",
-                    self.logs(record["task_id"], 65536),
+                    self._log_tail(job, 65536),
                 ):
                     status = "budget_exhausted"
                 else:
@@ -378,7 +329,7 @@ class TaskRunner:
                 self._persist(job)
                 logger.info(
                     "Task %s finished: %s (exit=%s)",
-                    record["task_id"],
+                    job.directory.name,
                     status,
                     exit_code,
                 )
@@ -386,29 +337,30 @@ class TaskRunner:
                 job.record.update(
                     status="requires_attention", exit_code=exit_code, finished_at=_now()
                 )
-                logger.exception(
-                    "Cannot record result for task %s", job.record["task_id"]
-                )
+                logger.exception("Cannot record result for task in %s", job.directory)
             finally:
                 if job.terminal_fd is not None:
                     os.close(job.terminal_fd)
                     job.terminal_fd = None
+                self._requires_attention = job.record["status"] in ATTENTION_STATUSES
+                self._active = None
                 job.done.set()
+                if self._closed:
+                    self._lease.close()
 
-    def get(self, task_id: str) -> dict[str, Any]:
-        """Return local process status and the latest available navigation evidence."""
-        with self._lock:
-            return self._snapshot(self._jobs[task_id])
+    def wait(self, job: _Job, timeout_s: float | None = None) -> dict[str, Any]:
+        """Wait for the owned process to finish and return its recorded result."""
+        if not job.done.wait(timeout_s):
+            raise TimeoutError("task has not finished")
+        return copy.deepcopy(job.record)
 
-    def logs(self, task_id: str, tail_bytes: int = 16384) -> str:
-        """Read a bounded UTF-8 tail of the owned child's combined output."""
-        with self._lock:
-            path = Path(self._jobs[task_id].record["log_file"])
-            with path.open("rb") as handle:
-                handle.seek(0, os.SEEK_END)
-                size = handle.tell()
-                handle.seek(max(0, size - tail_bytes))
-                return handle.read(tail_bytes).decode("utf-8", errors="replace")
+    @staticmethod
+    def _log_tail(job: _Job, tail_bytes: int) -> str:
+        with Path(job.record["log_file"]).open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - tail_bytes))
+            return handle.read(tail_bytes).decode("utf-8", errors="replace")
 
     @staticmethod
     def _signal(job: _Job, sig: signal.Signals) -> None:
@@ -434,58 +386,43 @@ class TaskRunner:
             except subprocess.TimeoutExpired:
                 self._signal(job, signal.SIGKILL)
 
-    def stop(self, task_id: str) -> dict[str, Any]:
-        """Request SIGINT cleanup once; escalate only after the grace period."""
-        with self._lock:
-            job = self._jobs[task_id]
-            if (
-                job.process is not None
-                and job.record["status"] in ACTIVE_STATUSES
-                and not job.record["stop_requested"]
-            ):
-                job.record.update(status="stopping", stop_requested=True)
-                try:
-                    self._persist(job)
-                finally:
-                    self._signal(job, signal.SIGINT)
-                    threading.Thread(
-                        target=self._escalate_stop, args=(job,), daemon=True
-                    ).start()
-            return self._snapshot(job)
+    def _request_stop(self, job: _Job) -> None:
+        if job is not self._active or job.record["stop_requested"]:
+            return
+        job.record.update(status="stopping", stop_requested=True)
+        try:
+            self._persist(job)
+        finally:
+            self._signal(job, signal.SIGINT)
+            threading.Thread(
+                target=self._escalate_stop, args=(job,), daemon=True
+            ).start()
 
-    def health(self) -> dict[str, Any]:
-        """Report runner availability without making model or simulator requests."""
+    def cancel(self, job: _Job) -> None:
+        """Request graceful interruption and wait for its bounded cleanup."""
+        try:
+            with self._lock:
+                self._request_stop(job)
+        finally:
+            job.done.wait(self._stop_timeout_s + 5)
+
+    def health(self) -> dict[str, bool]:
+        """Report availability and whether earlier motion needs reconciliation."""
         with self._lock:
-            active = [
-                task_id
-                for task_id, job in self._jobs.items()
-                if job.record["status"] in ACTIVE_STATUSES
-            ]
-            attention = [
-                task_id
-                for task_id, job in self._jobs.items()
-                if job.record["status"] in ATTENTION_STATUSES
-            ]
             return {
                 "ok": not self._closed,
-                "busy": bool(active),
-                "active_task_ids": active,
-                "attention_task_ids": attention,
+                "busy": self._active is not None,
+                "requires_attention": self._requires_attention,
             }
 
     def close(self) -> None:
-        """Drain owned children before releasing the single-service lease."""
+        """Drain the owned process before releasing the single-service lease."""
         with self._lock:
             if self._closed:
                 return
             self._closed = True
-            active = [
-                job
-                for job in self._jobs.values()
-                if job.record["status"] in ACTIVE_STATUSES
-            ]
-            for job in active:
-                self.stop(job.record["task_id"])
-        for job in active:
-            job.done.wait(self._stop_timeout_s + 5)
-        self._lease.close()
+            active = self._active
+            if active is None:
+                self._lease.close()
+                return
+        self.cancel(active)

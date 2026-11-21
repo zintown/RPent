@@ -24,7 +24,8 @@ import socket
 import sys
 import threading
 import time
-from contextlib import closing, contextmanager
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
 
@@ -33,7 +34,6 @@ import pytest
 import uvicorn
 
 from robots.unitree.mcp.task.server import create_app
-from rpent.tools.mcp_client import McpClient, McpServerConfig
 from tests.e2e_tests.offline_planner_server import (
     OFFLINE_MODEL_NAME,
     OfflinePlannerServer,
@@ -44,7 +44,7 @@ REPO = Path(__file__).resolve().parents[3]
 PROJECT = REPO.parent
 pytestmark = pytest.mark.skipif(
     os.environ.get("RPENT_RUN_UNITREE_VLN") != "1",
-    reason="requires the operator-started Go2, A* and real LightNav services",
+    reason="requires operator-started Go2, observation and LightNav services",
 )
 
 
@@ -66,15 +66,119 @@ def task_api(jobs):
         while not server.started:
             assert thread.is_alive() and time.monotonic() < deadline
             time.sleep(0.01)
-        with closing(
-            McpClient("rpent", McpServerConfig(url=endpoint + "/mcp/"))
-        ) as client:
-            yield endpoint, client
+        yield endpoint
     finally:
         server.should_exit = True
         thread.join(40)
         listener.close()
         assert not thread.is_alive(), "owned task API did not drain its child"
+
+
+def run_task(endpoint, output, *, cancel, origin):
+    """Call run_task and exercise standard MCP cancellation for its in-flight request."""
+    mcp = endpoint + "/mcp"
+    headers = {"Accept": "application/json, text/event-stream"}
+    samples = []
+    request_id = 1
+
+    def post(http, method, params, *, request_id=None):
+        message = {"jsonrpc": "2.0", "method": method, "params": params}
+        if request_id is not None:
+            message["id"] = request_id
+        return http.post(mcp, json=message, headers=headers).raise_for_status()
+
+    with httpx.Client(trust_env=False, timeout=75) as http:
+        response = post(
+            http,
+            "initialize",
+            {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {"name": "vln-policy-test", "version": "1"},
+            },
+            request_id=0,
+        )
+        headers["Mcp-Session-Id"] = response.headers["Mcp-Session-Id"]
+        headers["MCP-Protocol-Version"] = response.json()["result"]["protocolVersion"]
+        post(http, "notifications/initialized", {})
+        requested_stop = False
+
+        def stop():
+            post(http, "notifications/cancelled", {"requestId": request_id})
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pending = pool.submit(
+                post,
+                http,
+                "tools/call",
+                {
+                    "name": "run_task",
+                    "arguments": {"instruction": "bounded VLN integration"},
+                },
+                request_id=request_id,
+            )
+            try:
+                deadline = time.monotonic() + 70
+                while not pending.done() and time.monotonic() < deadline:
+                    if not cancel:
+                        time.sleep(0.05)
+                        continue
+                    state_path = next(
+                        output.glob("runs/*/navigation/vln/latest.json"), None
+                    )
+                    if state_path is None:
+                        time.sleep(0.05)
+                        continue
+                    vln = json.loads(state_path.read_text())
+                    pose = vln.get("pose") or origin
+                    yaw_delta = pose["yaw"] - origin["yaw"]
+                    moved = (
+                        math.hypot(pose["x"] - origin["x"], pose["y"] - origin["y"])
+                        > 0.02
+                        or abs(math.atan2(math.sin(yaw_delta), math.cos(yaw_delta)))
+                        > 0.02
+                    )
+                    samples.append(
+                        {
+                            "time": time.time(),
+                            "vln_state": vln.get("state"),
+                            "predictions": vln.get("predictions"),
+                            "active_control_id": vln.get("active_control_id"),
+                            "pose": pose,
+                        }
+                    )
+                    if (
+                        vln.get("predictions", 0) >= 5
+                        and vln.get("active_control_id")
+                        and moved
+                    ):
+                        stop()
+                        requested_stop = True
+                        break
+                    time.sleep(0.05)
+                if requested_stop:
+                    while http.get(endpoint + "/healthz", timeout=3).json()["busy"]:
+                        assert time.monotonic() < deadline, "owned task did not stop"
+                        time.sleep(0.05)
+                else:
+                    result = pending.result(timeout=2).json()["result"]
+                    assert not result.get("isError"), result
+                    assert result["structuredContent"]["status"] == "succeeded"
+            finally:
+                if not pending.done() and not requested_stop:
+                    stop()
+                http.delete(mcp, headers=headers).raise_for_status()
+        [job_path] = list((output / "jobs").glob("*/job.json"))
+        job = json.loads(job_path.read_text())
+    (output / "samples.json").write_text(
+        json.dumps(samples, ensure_ascii=False, indent=2) + "\n"
+    )
+    (output / "job-result.json").write_text(
+        json.dumps(job, ensure_ascii=False, indent=2) + "\n"
+    )
+    if cancel:
+        assert requested_stop, job
+    return job, samples
 
 
 def run_case(monkeypatch, *, cancel):
@@ -90,7 +194,6 @@ def run_case(monkeypatch, *, cancel):
     )
     output = output / (("cancel-" if cancel else "hold-") + uuid4().hex[:10])
     output.mkdir(parents=True)
-    identity = {"robot_id": "go2-vln-test", "task_id": output.name}
     with httpx.Client(trust_env=False, timeout=10) as http:
         health = http.get(sim + "/health").json()
         assert health["control_mode"] == "idle" and not health["other_controllers"]
@@ -124,7 +227,6 @@ def run_case(monkeypatch, *, cancel):
             "tool_timeout_sec = 60\n"
             f"args = {json.dumps(['-m', 'robots.unitree.mcp.vln.server', '--sim-endpoint', sim, '--observation-endpoint', observation, '--vln-endpoint', model, '--vln-timeout-s', '40'])}\n"
         )
-        samples = []
         with OfflinePlannerServer(script) as planner:
             config = {
                 "RPENT_VENV_DIR": str(PROJECT / ".venv"),
@@ -149,73 +251,14 @@ def run_case(monkeypatch, *, cancel):
             )
             config_path.chmod(0o600)
             monkeypatch.setenv("RPENT_CONFIG_FILE", str(config_path))
-            with task_api(output / "jobs") as (endpoint, client):
-
-                def call(name, **arguments):
-                    result = client.call_tool(name, arguments)
-                    assert not result.isError, result
-                    return result.structuredContent
-
-                started = call(
-                    "submit_robot_task",
-                    **identity,
-                    task_name="bounded VLN integration",
-                )
-                assert started["created"]
-                job = started["task"]
-                deadline = time.monotonic() + 75
-                requested_stop = False
-                try:
-                    while time.monotonic() < deadline:
-                        job = call("get_robot_task", **identity)
-                        vln = (job.get("navigation") or {}).get("vln") or {}
-                        pose = vln.get("pose") or origin
-                        yaw_delta = pose["yaw"] - origin["yaw"]
-                        moved = (
-                            math.hypot(pose["x"] - origin["x"], pose["y"] - origin["y"])
-                            > 0.02
-                            or abs(math.atan2(math.sin(yaw_delta), math.cos(yaw_delta)))
-                            > 0.02
-                        )
-                        samples.append(
-                            {
-                                "time": time.time(),
-                                "task_status": job["status"],
-                                "vln_state": vln.get("state"),
-                                "predictions": vln.get("predictions"),
-                                "active_control_id": vln.get("active_control_id"),
-                                "pose": pose,
-                            }
-                        )
-                        if (
-                            cancel
-                            and not requested_stop
-                            and vln.get("predictions", 0) >= 5
-                            and vln.get("active_control_id")
-                            and moved
-                        ):
-                            call("stop_robot_task", **identity)
-                            requested_stop = True
-                        if job["status"] not in {"starting", "running", "stopping"}:
-                            break
-                        time.sleep(0.05)
-                    else:
-                        raise AssertionError("bounded VLN MCP task timed out")
-                finally:
-                    if job["status"] in {"starting", "running"}:
-                        call("stop_robot_task", **identity)
-                    (output / "samples.json").write_text(
-                        json.dumps(samples, ensure_ascii=False, indent=2) + "\n"
-                    )
-                    (output / "job-result.json").write_text(
-                        json.dumps(job, ensure_ascii=False, indent=2) + "\n"
-                    )
+            with task_api(output / "jobs") as endpoint:
+                job, samples = run_task(endpoint, output, cancel=cancel, origin=origin)
                 vln = job["navigation"]["vln"]
                 assert job["status"] == ("stopped" if cancel else "succeeded"), job
                 assert vln["predictions"] >= 1 and vln["accepted_references"] >= 1
                 assert vln["stop_confirmed"] and vln["active_control_id"] is None
                 if cancel:
-                    assert requested_stop and vln["state"] == "cancelled", job
+                    assert vln["state"] == "cancelled", job
                 else:
                     assert vln["goal_verified"] and vln["state"] == "finished"
                     planner.assert_complete()

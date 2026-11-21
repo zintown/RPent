@@ -17,8 +17,7 @@ export RPENT_MEMORY_DIR="$PWD/output/real-integration/memory"
   -- "$RPENT_VENV_DIR/bin/python" -m robots.unitree.mcp.real.server \
   --endpoint http://127.0.0.1:9001 --robot-index 1
 
-bash run_rpent.sh "go2-status-$(date -u +%Y%m%dT%H%M%SZ)" \
-  '查询 Go2 的在线、心跳和相机状态，报告结果。'
+bash run_rpent.sh '查询 Go2 的在线、心跳和相机状态，报告结果。'
 ```
 
 DSH 通过 [RPent 任务 MCP](TASK_MCP.zh-CN.md) 下发同样的任务。启动 runner 时选择这份 `RPENT_MCP_CONFIG`。同机运行多个 runner 时，为各自设置监听端口、`--robot-id` 和任务目录。

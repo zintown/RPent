@@ -4,7 +4,7 @@ RPent 从 MCP 配置发现 Unitree 服务。任务通过同一个命令执行。
 
 ```bash
 export RPENT_VENV_DIR="$(cd .. && pwd)/.venv"
-bash run_rpent.sh "$(date -u +%Y%m%dT%H%M%SZ)" '查询 Go2 当前位姿'
+bash run_rpent.sh '查询 Go2 当前位姿'
 ```
 
 在 RPent 仓库根目录运行。脚本加载私有 `.env.local` 和默认的 `mcp.toml`。用 `RPENT_MCP_CONFIG` 选择其他 MCP 配置，直接运行 RPent CLI 时用 `--mcp-config` 指定配置。

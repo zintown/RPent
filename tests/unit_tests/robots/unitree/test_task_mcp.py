@@ -4,7 +4,7 @@
 # You may obtain a copy of the License at
 # https://www.apache.org/licenses/LICENSE-2.0
 
-"""Exercise real MCP messages and shared runner ownership without robot motion."""
+"""Exercise the public Streamable HTTP MCP task contract."""
 
 import asyncio
 import json
@@ -15,29 +15,31 @@ from pathlib import Path
 
 import httpx
 import pytest
-from mcp import ClientSession
+from anyio import fail_after
+from mcp import ClientSession, types
 from mcp.client.streamable_http import streamable_http_client
 
 from robots.unitree.mcp.task.server import create_app
 
 TOKEN = "offline-test-token"
 URL = "http://127.0.0.1:8780"
-CHILD = """
+CHILD = r"""
 import json, signal, sys, time
 from pathlib import Path
+from tempfile import mkdtemp
+
 root = Path.cwd()
-output = root / 'outputs' / sys.argv[1]
-output.mkdir(parents=True)
+output = Path(mkdtemp(prefix="output-", dir=root))
+instruction = sys.argv[1]
 print('RPent output: ' + str(output), flush=True)
 with (root / 'launches.jsonl').open('a') as f:
-    f.write(json.dumps({'id': sys.argv[1]}) + '\\n')
-(output / 'states.json').write_text(json.dumps({'steps': [{'state': {}}]}))
-if sys.argv[2] == 'wait':
+    f.write(json.dumps(sys.argv[1:]) + '\n')
+if instruction == 'wait':
     signal.signal(signal.SIGINT, lambda *_: sys.exit(130))
-    print('waiting for stop', flush=True)
+    (root / 'ready').touch()
     while True:
         time.sleep(.05)
-finish = {'status': 'failure' if sys.argv[2] == 'failure' else 'success', 'summary': 'checked'}
+finish = {'status': 'failure' if instruction == 'failure' else 'success', 'summary': 'checked'}
 (output / 'transcript_unitree_test.json').write_text(json.dumps({'finish': finish, 'error': None}))
 """
 
@@ -62,194 +64,121 @@ def make_app(root: Path, **kwargs):
 
 
 @asynccontextmanager
-async def connect(app):
+async def connect(app, path="/mcp"):
     async with app.router.lifespan_context(app):
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app),
             headers={"Authorization": "Bearer " + TOKEN},
             base_url=URL,
         ) as http:
-            async with streamable_http_client(URL + "/mcp/", http_client=http) as (
+            async with streamable_http_client(URL + path, http_client=http) as (
                 read,
                 write,
-                _,
+                session_id,
             ):
                 async with ClientSession(read, write) as session:
-                    await session.initialize()
-                    yield session, http
+                    initialized = await session.initialize()
+                    yield session, http, initialized, session_id
 
 
-async def call(session, name, **args):
-    result = await session.call_tool(name, args)
+async def run_task(session, instruction):
+    result = await session.call_tool("run_task", {"instruction": instruction})
     assert not result.isError, result
     return result.structuredContent
 
 
-def test_mcp_is_the_only_task_entry_point_and_reuses_task_ids(root):
+@pytest.mark.parametrize("path", ["/mcp", "/mcp/"])
+def test_run_task_schema_and_terminal_result(root, path):
     async def run():
-        async with connect(make_app(root)) as (session, http):
-            tools = {tool.name for tool in (await session.list_tools()).tools}
-            assert tools == {
-                "list_robots",
-                "submit_robot_task",
-                "get_robot_task",
-                "wait_robot_task",
-                "get_robot_logs",
-                "stop_robot_task",
+        async with connect(make_app(root), path) as (session, http, info, session_id):
+            tools = (await session.list_tools()).tools
+            assert [tool.name for tool in tools] == ["run_task"]
+            assert set(tools[0].inputSchema["properties"]) == {"instruction"}
+            assert "run_task" in info.instructions
+            assert session_id()
+            instruction = '查询 Go2 位姿 "quoted"'
+            result = await run_task(session, instruction)
+            assert result == {
+                "robot_id": "go2-test",
+                "status": "succeeded",
+                "summary": "checked",
+                "error": None,
+                "output_dir": result["output_dir"],
+                "navigation": None,
             }
-            robots = await call(session, "list_robots")
-            assert robots["robots"][0]["robot_id"] == "go2-test"
-            assert not robots["robots"][0]["busy"]
-            assert (await http.get("/healthz")).json()["ok"]
-            args = {"robot_id": "go2-test", "task_id": "task-1", "task_name": "success"}
-            started = await call(session, "submit_robot_task", **args)
-            assert started["created"]
-            finished = await call(
-                session,
-                "wait_robot_task",
-                robot_id="go2-test",
-                task_id="task-1",
-                timeout_s=3,
-            )
-            assert finished["terminal"]
-            assert finished["task"]["status"] == "succeeded"
-            identity = {"robot_id": "go2-test", "task_id": "task-1"}
-            assert await call(session, "get_robot_task", **identity) == finished["task"]
-            logs = await call(session, "get_robot_logs", **identity, tail_bytes=8)
-            assert 0 < len(logs["text"]) <= 8
-            assert not (await call(session, "submit_robot_task", **args))["created"]
-            for method, path in (
-                ("POST", "/api/rpend/run"),
-                ("GET", "/api/rpend/run/task-1"),
-                ("GET", "/api/rpend/run/task-1/logs"),
-                ("POST", "/api/rpend/run/task-1/stop"),
-            ):
-                assert (await http.request(method, path)).status_code == 404
-            changed = await session.call_tool(
-                "submit_robot_task", args | {"task_name": "different"}
-            )
-            assert changed.isError
+            assert Path(result["output_dir"]).is_dir()
+            assert (await http.post("/api/rpend/run", json={})).status_code == 404
+            assert not (await http.get("/healthz")).json()["busy"]
+            repeated = await run_task(session, instruction)
+            assert repeated["output_dir"] != result["output_dir"]
         launches = [
             json.loads(line)
             for line in (root / "launches.jsonl").read_text().splitlines()
         ]
-        assert launches == [{"id": "task-1"}]
+        assert launches == [[instruction], [instruction]]
 
     asyncio.run(run())
 
 
-def test_wait_timeout_keeps_task_running_and_stop_releases_owner(root):
+def test_mcp_cancellation_stops_only_owned_request_and_releases_runner(root):
     async def run():
-        async with connect(make_app(root)) as (session, _):
-            await call(
-                session,
-                "submit_robot_task",
-                robot_id="go2-test",
-                task_id="task-wait",
-                task_name="wait",
+        async with connect(make_app(root)) as (session, http, _, _):
+            request_ids = []
+
+            async def capture_wait_id(request):
+                if request.method == "POST":
+                    message = json.loads(request.content)
+                    if message.get("method") == "tools/call" and message["params"][
+                        "arguments"
+                    ] == {"instruction": "wait"}:
+                        request_ids.append(message["id"])
+
+            http.event_hooks["request"].append(capture_wait_id)
+            pending = asyncio.create_task(
+                session.call_tool("run_task", {"instruction": "wait"})
             )
-            waiting = await call(
-                session,
-                "wait_robot_task",
-                robot_id="go2-test",
-                task_id="task-wait",
-                timeout_s=0.2,
-            )
-            assert not waiting["terminal"]
-            assert waiting["task"]["status"] == "running"
-            blocked = await session.call_tool(
-                "submit_robot_task",
-                {
-                    "robot_id": "go2-test",
-                    "task_id": "task-other",
-                    "task_name": "success",
-                },
-            )
-            assert blocked.isError
-            logs = await call(
-                session, "get_robot_logs", robot_id="go2-test", task_id="task-wait"
-            )
-            assert "waiting for stop" in logs["text"]
-            await call(
-                session, "stop_robot_task", robot_id="go2-test", task_id="task-wait"
-            )
-            stopped = await call(
-                session,
-                "wait_robot_task",
-                robot_id="go2-test",
-                task_id="task-wait",
-                timeout_s=3,
-            )
-            assert stopped["task"]["status"] == "stopped"
-            await call(
-                session,
-                "submit_robot_task",
-                robot_id="go2-test",
-                task_id="task-after",
-                task_name="failure",
-            )
-            failed = await call(
-                session,
-                "wait_robot_task",
-                robot_id="go2-test",
-                task_id="task-after",
-                timeout_s=3,
-            )
-            assert failed["task"]["status"] == "failed"
+            try:
+                with fail_after(5):
+                    while not (root / "ready").exists():
+                        await asyncio.sleep(0.01)
+                blocked = await session.call_tool(
+                    "run_task", {"instruction": "success"}
+                )
+                assert blocked.isError and "already running" in blocked.content[0].text
+                [request_id] = request_ids
+                await session.send_notification(
+                    types.ClientNotification(
+                        types.CancelledNotification(
+                            params=types.CancelledNotificationParams(
+                                requestId=request_id
+                            )
+                        )
+                    )
+                )
+                with fail_after(5):
+                    while (await http.get("/healthz")).json()["busy"]:
+                        await asyncio.sleep(0.01)
+                [record_file] = list((root / "jobs").glob("*/job.json"))
+                record = json.loads(record_file.read_text())
+                assert record["status"] == "stopped" and not record["forced_stop"]
+                assert (await run_task(session, "failure"))["status"] == "failed"
+            finally:
+                pending.cancel()
+                await asyncio.gather(pending, return_exceptions=True)
 
     asyncio.run(run())
 
 
-def test_restart_retains_task_id_without_motion_replay(root):
+def test_invalid_instruction_never_launches(root):
     async def run():
-        args = {
-            "robot_id": "go2-test",
-            "task_id": "task-persist",
-            "task_name": "success",
-        }
-        async with connect(make_app(root)) as (session, _):
-            await call(session, "submit_robot_task", **args)
-            await call(
-                session,
-                "wait_robot_task",
-                robot_id="go2-test",
-                task_id="task-persist",
-                timeout_s=3,
-            )
-        async with connect(make_app(root)) as (session, _):
-            result = await call(session, "submit_robot_task", **args)
-            assert not result["created"]
-            assert result["task"]["status"] == "succeeded"
-        assert len((root / "launches.jsonl").read_text().splitlines()) == 1
-
-    asyncio.run(run())
-
-
-def test_wrong_robot_and_invalid_arguments_never_launch(root):
-    async def run():
-        async with connect(make_app(root)) as (session, _):
+        async with connect(make_app(root)) as (session, _, _, _):
             for args in (
-                {"robot_id": "other", "task_id": "valid", "task_name": "success"},
-                {
-                    "robot_id": "go2-test",
-                    "task_id": "../invalid",
-                    "task_name": "success",
-                },
-                {"robot_id": "go2-test", "task_id": "valid", "task_name": " "},
+                {},
+                {"instruction": ""},
+                {"instruction": " "},
+                {"instruction": "x" * 20001},
             ):
-                assert (await session.call_tool("submit_robot_task", args)).isError
-            assert (
-                await session.call_tool(
-                    "wait_robot_task",
-                    {"robot_id": "go2-test", "task_id": "valid", "timeout_s": 31},
-                )
-            ).isError
-            assert (
-                await session.call_tool(
-                    "get_robot_logs",
-                    {"robot_id": "go2-test", "task_id": "valid", "tail_bytes": 65537},
-                )
-            ).isError
+                assert (await session.call_tool("run_task", args)).isError
         assert not (root / "launches.jsonl").exists()
 
     asyncio.run(run())
@@ -262,36 +191,29 @@ def test_mcp_requires_token_and_rejects_untrusted_host(root):
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url=URL
             ) as http:
-                assert (await http.post("/mcp/", json={})).status_code == 401
+                assert (await http.post("/mcp", json={})).status_code == 401
                 body = {
                     "jsonrpc": "2.0",
                     "id": 1,
                     "method": "initialize",
                     "params": {
-                        "protocolVersion": "2025-03-26",
+                        "protocolVersion": "2025-11-25",
                         "capabilities": {},
                         "clientInfo": {"name": "test", "version": "1"},
                     },
                 }
+                headers = {
+                    "Authorization": "Bearer " + TOKEN,
+                    "Accept": "application/json, text/event-stream",
+                }
                 response = await http.post(
-                    "/mcp/",
-                    json=body,
-                    headers={
-                        "Authorization": "Bearer " + TOKEN,
-                        "Host": "untrusted.example",
-                        "Accept": "application/json, text/event-stream",
-                    },
+                    "/mcp", json=body, headers=headers | {"Host": "untrusted.example"}
                 )
                 assert response.status_code == 421
                 response = await http.post(
-                    "/mcp/",
-                    json=body,
-                    headers={
-                        "Authorization": "Bearer " + TOKEN,
-                        "Host": "go2.internal:8780",
-                        "Accept": "application/json, text/event-stream",
-                    },
+                    "/mcp", json=body, headers=headers | {"Host": "go2.internal:8780"}
                 )
                 assert response.status_code == 200
+                assert response.headers["Mcp-Session-Id"]
 
     asyncio.run(run())

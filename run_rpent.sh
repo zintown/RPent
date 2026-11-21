@@ -9,7 +9,7 @@ set -euo pipefail
 
 if [[ $# -eq 1 && "$1" == '--help' ]]; then
     cat <<'HELP'
-用法：bash run_rpent.sh TASK_ID '自然语言任务'
+用法：bash run_rpent.sh '自然语言任务'
 
 先准备 .venv。脚本自动加载仓库的 .env.local，执行调度端指定的任务。
 
@@ -29,8 +29,8 @@ HELP
     exit 0
 fi
 
-if [[ $# -ne 2 || -z "${1//[[:space:]]/}" || -z "${2//[[:space:]]/}" ]]; then
-    echo "用法：bash run_rpent.sh TASK_ID '自然语言任务'" >&2
+if [[ $# -ne 1 || -z "${1//[[:space:]]/}" ]]; then
+    echo "用法：bash run_rpent.sh '自然语言任务'" >&2
     exit 2
 fi
 
@@ -52,7 +52,6 @@ fi
 # 从其他目录调用时，也以仓库为基准解析路径。
 rpent_python=$(cd -- "$(dirname -- "$rpent_python")" && pwd)/python
 cd -- "$rpent_repo_dir"
-"$rpent_python" -c 'import sys; from robots.unitree.mcp.task.runner import validate_task_id; validate_task_id(sys.argv[1])' "$1"
 mkdir -p -- "${RPENT_RUNS_DIR:-logs}"
 rpent_run_dir=$(mktemp -d "${RPENT_RUNS_DIR:-logs}/rpend-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")
 export RPENT_TASK_OUTPUT_DIR="$(cd -- "$rpent_run_dir" && pwd)"
@@ -66,7 +65,7 @@ exec "$rpent_python" -m rpent.cli.main \
     --robot unitree --mcp-config "${RPENT_MCP_CONFIG:-$rpent_repo_dir/mcp.toml}" \
     "${rpent_memory_args[@]}" \
     --planner api --model "${RPENT_MODEL:-openai:deepseek-flash}" \
-    --task="$2" \
+    --task="$1" \
     --planner-timeout-s "${RPENT_PLANNER_TIMEOUT_S:-900}" \
     --max-turns "${RPENT_MAX_TURNS:-16}" \
     --output-dir "$rpent_run_dir"

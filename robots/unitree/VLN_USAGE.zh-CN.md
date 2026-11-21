@@ -15,7 +15,7 @@ A* 继续负责地图路径规划；同一台 Go2 每次只执行一种导航方
 | A* | `http://127.0.0.1:8765` | 点位查询、地图路径规划 |
 | Go2 控制 | `http://127.0.0.1:8770` | `/walk` 或持续航点会话 |
 | Go2 观测 | `http://127.0.0.1:8771` | `/observation`、`/camera/front` |
-| RPent 任务 MCP | `http://127.0.0.1:8780/mcp/` | DSH 提交任务、查询进度、读取日志和取消 |
+| RPent 任务 MCP | `http://127.0.0.1:8780/mcp` | DSH 调用 `run_task` 并接收最终结果 |
 
 现有推理依赖、Go2 仿真和 A* 应已准备好。已有共享环境时，仅需注册本地包：
 
@@ -72,7 +72,7 @@ cp -n mcp.toml "$RPENT_MCP_CONFIG"
 底层地址变化时，在配置的启动参数中设置 `--vln-endpoint`、`--observation-endpoint` 或 `--sim-endpoint`。`--vln-timeout-s` 默认 120 秒，`--vln-inference-timeout-s` 默认 3 秒。MCP 的 `tool_timeout_sec` 应留出 episode 结束后的停车与清理时间。
 
 ```bash
-bash run_rpent.sh "vln-$(date -u +%Y%m%dT%H%M%SZ)" \
+bash run_rpent.sh \
   '使用 VLN 保持当前地图位置并确认停车。先读取当前位置作为验收坐标。'
 ```
 
@@ -112,22 +112,22 @@ bash run_rpent.sh "vln-$(date -u +%Y%m%dT%H%M%SZ)" \
 
 ## MCP 任务状态
 
-活动工具持续写入 `navigation/vln/latest.json`。MCP 的 `get_robot_task` 在任务运行期间也可读取 `navigation.vln`。
+活动工具持续写入 `navigation/vln/latest.json`。任务结束后，`run_task` 在 `navigation.vln` 中返回执行证据。
 
 ```json
 {
   "navigation": {
-    "active_control_id": "control_...",
+    "active_control_id": null,
     "vln": {
       "episode_id": "vln_...",
-      "state": "tracking",
+      "state": "finished",
       "predictions": 7,
       "accepted_references": 7,
       "latency_ms": 250.0,
       "capture_age_s": 0.31,
       "model_stop": false,
-      "stop_confirmed": false,
-      "goal_verified": false
+      "stop_confirmed": true,
+      "goal_verified": true
     }
   }
 }
@@ -139,7 +139,7 @@ bash run_rpent.sh "vln-$(date -u +%Y%m%dT%H%M%SZ)" \
 及停车均通过。`control` 内有仿真步态、MPC 和实测运动反馈；`latest_frame` 是
 本地诊断文件路径，第一视角画面可通过 8771 的观测接口查看。
 
-已停车但目标未验证时，任务终态为 `verification_required`。DSH 请求停止后继续查询，确认任务终态和 `stop_confirmed`。控制权或停车状态不明时，任务终态为 `requires_attention`，runner 等待核对后再接收新任务。
+已停车但目标未验证时，任务终态为 `verification_required`。取消 MCP 调用后，可以在 RPent 主机的 `navigation/vln/latest.json` 中核对停车。控制权或停车状态不明时，任务终态为 `requires_attention`，runner 等待核对后再接收新任务。
 
 ## 验证与限制
 
