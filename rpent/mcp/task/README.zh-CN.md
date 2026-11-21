@@ -59,6 +59,8 @@ export RPENT_VENV_DIR="$(cd .. && pwd)/.venv"
 
 每个节点同时执行一条指令。客户端通过 MCP 取消正在运行的调用，RPent 随即请求结束本次执行。停车证据不完整时，以 `requires_attention` 暂停接收新任务。需要独立验收的任务返回 `verification_required`。`GET /healthz` 可查看进程占用和待核对状态。客户端单次工具超时应大于该机器人配置的任务预算和清理时间。
 
+支持查询执行回执的 HTTP 服务可配置 `run_report_tool = "get_run_report"`。RPent 在工具调用的 `_meta` 中附带内部执行标识 `rpent.dev/run-id`。服务用同一标识提供本次执行的只读报告，供 RPent 在成功、失败或取消后查询。报告的 `state` 为 `running`、`finished` 或 `missing`，可包含 `evidence`、`requires_attention`、`verification_required`、`error` 和 `stop_error`。DSH 仍通过 `run_task(instruction)` 提交任务。
+
 ## 添加本体服务
 
 先启动服务的 MCP 接口，在该机器人的 `[mcp_servers]` 下注册它，然后在 `[capabilities]` 下声明能力及只读检查。按需把动作工具加入白名单。具备 MCP 工具的机器人可沿用 `mcp` 适配器。需要专用提示词或停车与验收证据时，在 `robots/<适配器>` 注册 `RobotSpec`，通过 `task_execution.read_evidence` 返回对应的结构化证据与结束条件。

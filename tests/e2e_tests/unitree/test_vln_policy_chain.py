@@ -21,11 +21,10 @@ import math
 import os
 import shlex
 import socket
-import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import ExitStack, closing, contextmanager
 from pathlib import Path
 from uuid import uuid4
 
@@ -34,6 +33,7 @@ import pytest
 import uvicorn
 
 from rpent.mcp.task.server import create_app
+from rpent.tools.mcp_client import McpClient, McpServerConfig
 from tests.e2e_tests.offline_planner_server import (
     OFFLINE_MODEL_NAME,
     OfflinePlannerServer,
@@ -44,7 +44,7 @@ REPO = Path(__file__).resolve().parents[3]
 PROJECT = REPO.parent
 pytestmark = pytest.mark.skipif(
     os.environ.get("RPENT_RUN_UNITREE_VLN") != "1",
-    reason="requires operator-started Go2, observation and LightNav services",
+    reason="requires operator-started Go2, observation and LightNav HTTP MCP services",
 )
 
 
@@ -74,7 +74,7 @@ def task_api(jobs, config):
         assert not thread.is_alive(), "owned task API did not drain its child"
 
 
-def run_task(endpoint, output, *, cancel, origin):
+def run_task(endpoint, output, vln_mcp, *, cancel, origin):
     """Call run_task and exercise standard MCP cancellation for its in-flight request."""
     mcp = endpoint + "/mcp"
     headers = {"Accept": "application/json, text/event-stream"}
@@ -87,7 +87,7 @@ def run_task(endpoint, output, *, cancel, origin):
             message["id"] = request_id
         return http.post(mcp, json=message, headers=headers).raise_for_status()
 
-    with httpx.Client(trust_env=False, timeout=75) as http:
+    with httpx.Client(trust_env=False, timeout=75) as http, ExitStack() as resources:
         response = post(
             http,
             "initialize",
@@ -110,6 +110,7 @@ def run_task(endpoint, output, *, cancel, origin):
         assert info["robot_id"] == "go2-vln-test" and info["state"] == "idle", info
         assert info["capabilities"][0]["status"] == "ready", info
         requested_stop = False
+        reporter = None
 
         def stop():
             post(http, "notifications/cancelled", {"requestId": request_id})
@@ -131,13 +132,26 @@ def run_task(endpoint, output, *, cancel, origin):
                     if not cancel:
                         time.sleep(0.05)
                         continue
-                    state_path = next(
-                        output.glob("jobs/*/output/navigation/vln/latest.json"), None
-                    )
-                    if state_path is None:
-                        time.sleep(0.05)
+                    if reporter is None:
+                        job_path = next(output.glob("jobs/*/job.json"), None)
+                        if job_path is None:
+                            time.sleep(0.1)
+                            continue
+                        owner = json.loads(job_path.read_text())
+                        reporter = resources.enter_context(
+                            closing(
+                                McpClient(
+                                    "vln",
+                                    McpServerConfig(url=vln_mcp),
+                                    run_id=owner["run_id"],
+                                )
+                            )
+                        )
+                    report = reporter.call_tool("get_run_report", {}).structuredContent
+                    vln = report.get("evidence", {}).get("navigation", {}).get("vln")
+                    if not vln:
+                        time.sleep(0.1)
                         continue
-                    vln = json.loads(state_path.read_text())
                     pose = vln.get("pose") or origin
                     yaw_delta = pose["yaw"] - origin["yaw"]
                     moved = (
@@ -163,7 +177,7 @@ def run_task(endpoint, output, *, cancel, origin):
                         stop()
                         requested_stop = True
                         break
-                    time.sleep(0.05)
+                    time.sleep(0.15)
                 if requested_stop:
                     while http.get(endpoint + "/healthz", timeout=3).json()["busy"]:
                         assert time.monotonic() < deadline, "owned task did not stop"
@@ -192,8 +206,7 @@ def run_task(endpoint, output, *, cancel, origin):
 def run_case(monkeypatch, *, cancel):
     """Exercise real inference, capture alignment, task status and bounded stopping."""
     sim = "http://127.0.0.1:8770"
-    observation = "http://127.0.0.1:8771"
-    model = os.environ.get("RPENT_UNITREE_VLN_ENDPOINT", "ws://127.0.0.1:8050")
+    vln_mcp = os.environ.get("RPENT_UNITREE_VLN_MCP", "http://127.0.0.1:8792/mcp")
     output = Path(
         os.environ.get(
             "RPENT_UNITREE_VLN_OUTPUT",
@@ -233,12 +246,9 @@ def run_case(monkeypatch, *, cancel):
             'tools = ["vln.run_vln_navigation"]\n'
             'checks = { "vln.get_vln_readiness" = { ready = true } }\n'
             "[mcp_servers.vln]\n"
-            'transport = "stdio"\n'
-            f"command = {json.dumps(sys.executable)}\n"
-            f"cwd = {json.dumps(str(REPO))}\n"
-            'env_from = ["RPENT_TASK_OUTPUT_DIR"]\n'
+            f"url = {json.dumps(vln_mcp)}\n"
+            'run_report_tool = "get_run_report"\n'
             "tool_timeout_sec = 60\n"
-            f"args = {json.dumps(['-m', 'robots.unitree.mcp.vln.server', '--sim-endpoint', sim, '--observation-endpoint', observation, '--vln-endpoint', model, '--vln-timeout-s', '40'])}\n"
         )
         with OfflinePlannerServer(script) as planner:
             config = {
@@ -263,7 +273,9 @@ def run_case(monkeypatch, *, cancel):
             env_path.chmod(0o600)
             monkeypatch.setenv("RPENT_CONFIG_FILE", str(env_path))
             with task_api(output / "jobs", config_path) as endpoint:
-                job, samples = run_task(endpoint, output, cancel=cancel, origin=origin)
+                job, samples = run_task(
+                    endpoint, output, vln_mcp, cancel=cancel, origin=origin
+                )
                 assert job["evidence"]["navigation"] == job["navigation"]
                 vln = job["evidence"]["navigation"]["vln"]
                 assert job["status"] == ("stopped" if cancel else "succeeded"), job

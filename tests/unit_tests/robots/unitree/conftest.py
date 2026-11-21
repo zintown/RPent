@@ -16,233 +16,23 @@
 
 from __future__ import annotations
 
-import json
-import math
 import socket
 import threading
 import time
-from contextlib import closing, contextmanager
+from contextlib import contextmanager
 from types import SimpleNamespace
+from typing import Any
 
-import httpx
 import pytest
 import uvicorn
+from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 
 @pytest.fixture(autouse=True)
 def tool_output_dir(tmp_path, monkeypatch):
     """Provide the run directory expected by shared tool-description templates."""
     monkeypatch.setattr("rpent.utils.logging._output_dir", tmp_path / "run")
-
-
-@pytest.fixture
-def navigation_services():
-    """Document-shaped REST services with asynchronous walk and stop behavior."""
-    from robots.unitree.navigation_client import NavigationClient
-    from robots.unitree.simulation_client import SimulationClient
-
-    identity = {"map_id": "test_room", "map_version": "v1"}
-    state = SimpleNamespace(
-        requests=[],
-        submissions=[],
-        pose={"x": 0.0, "y": 0.0, "yaw": 0.0, "fallen": False},
-        sim_version="v1",
-        running=False,
-        hold=False,
-        stopped=False,
-        failed=False,
-        simulator_running=True,
-        other_controllers=[],
-        remaining=0,
-        polls_before_finish=1,
-        walk_id=None,
-        status_walk_id=None,
-        submit_timeout=False,
-        preview_failed=False,
-        plan_mutator=None,
-        final_mutator=None,
-        status_unavailable=False,
-        started=threading.Event(),
-    )
-    waypoints = [
-        {
-            "id": "wp_01",
-            "name": "广告牌",
-            "stand_pose": {"x": 1.0, "y": 0.0, "yaw": 0.0},
-        },
-        {
-            "id": "wp_02",
-            "name": "厕所",
-            "stand_pose": {"x": 1.0, "y": 1.0, "yaw": 1.57},
-        },
-    ]
-    lock = threading.RLock()
-
-    def response(request):
-        with lock:
-            payload = json.loads(request.content) if request.content else None
-            path = request.url.path
-            state.requests.append((request.method, request.url.host, path, payload))
-            if request.url.host == "nav.test":
-                if path == "/health":
-                    return httpx.Response(
-                        200, json={"ok": True, **identity, "waypoints": 2}
-                    )
-                if path == "/waypoints":
-                    return httpx.Response(
-                        200, json={"ok": True, **identity, "waypoints": waypoints}
-                    )
-                if path == "/plan":
-                    legs = []
-                    start = payload["start"]
-                    previous = [start["x"], start["y"]]
-                    for query in payload["goals"]:
-                        if isinstance(query, str):
-                            goal = next(
-                                (g for g in waypoints if query in (g["id"], g["name"])),
-                                None,
-                            )
-                            if goal is None:
-                                return httpx.Response(
-                                    400,
-                                    json={"ok": False, "error": "unknown destination"},
-                                )
-                        else:
-                            goal = {
-                                "id": "xy",
-                                "name": "coordinate",
-                                "stand_pose": {**query, "yaw": query.get("yaw")},
-                            }
-                        target = goal["stand_pose"]
-                        dx, dy = target["x"] - previous[0], target["y"] - previous[1]
-                        path_points = [previous, [target["x"], target["y"]]]
-                        legs.append(
-                            {
-                                "query": query,
-                                "goal": goal,
-                                "path": path_points,
-                                "headings": [math.atan2(dy, dx)],
-                                "length": math.hypot(dx, dy),
-                            }
-                        )
-                        previous = path_points[-1]
-                    result = {
-                        "ok": True,
-                        **identity,
-                        "frame": "map",
-                        "units": {"length": "meter", "angle": "radian"},
-                        "start": start,
-                        "goals": [g["goal"]["id"] for g in legs],
-                        "legs": legs,
-                        "total_length": sum(g["length"] for g in legs),
-                        "warnings": [],
-                    }
-                    if state.plan_mutator:
-                        state.plan_mutator(result)
-                    return httpx.Response(200, json=result)
-            if request.url.host == "sim.test":
-                if path == "/health":
-                    return httpx.Response(
-                        200,
-                        json={
-                            "ok": True,
-                            **identity,
-                            "map_version": state.sim_version,
-                            "simulator_running": state.simulator_running,
-                            "other_controllers": state.other_controllers,
-                            "walk": {
-                                "state": "running" if state.running else "finished"
-                            },
-                        },
-                    )
-                if path == "/pose":
-                    return httpx.Response(200, json={"ok": True, **state.pose})
-                if path == "/preview":
-                    return httpx.Response(
-                        200,
-                        json={
-                            "ok": True,
-                            "result": {"ok": not state.preview_failed},
-                            "image": "/files/preview.png",
-                        },
-                    )
-                if path == "/walk" and request.method == "POST":
-                    if state.running:
-                        return httpx.Response(
-                            409, json={"ok": False, "error": "walk already running"}
-                        )
-                    state.submissions.append(payload)
-                    state.running, state.stopped, state.remaining = (
-                        True,
-                        False,
-                        state.polls_before_finish,
-                    )
-                    state.walk_id = f"walk_{len(state.submissions)}"
-                    state.started.set()
-                    if state.submit_timeout:
-                        raise httpx.ReadTimeout("acceptance timed out", request=request)
-                    return httpx.Response(
-                        200, json={"ok": True, "walk_id": state.walk_id}
-                    )
-                if path == "/walk/stop":
-                    state.stopped = True
-                    return httpx.Response(200, json={"ok": True})
-                if path == "/walk" and request.method == "GET":
-                    if state.status_unavailable:
-                        return httpx.Response(
-                            503,
-                            json={
-                                "ok": False,
-                                "error": "status temporarily unavailable",
-                            },
-                        )
-                    walk_id = state.status_walk_id or state.walk_id
-                    if not state.stopped and (state.hold or state.remaining > 0):
-                        state.remaining -= 1
-                        return httpx.Response(
-                            200,
-                            json={"ok": True, "state": "running", "walk_id": walk_id},
-                        )
-                    state.running = False
-                    reached = not state.failed and not state.stopped
-                    goal = state.submissions[-1]["legs"][0]["goal"]["stand_pose"]
-                    if reached:
-                        state.pose.update(
-                            x=goal["x"], y=goal["y"], yaw=goal.get("yaw") or 0.0
-                        )
-                    result = {
-                        "ok": True,
-                        "state": "finished",
-                        "walk_id": walk_id,
-                        "fell": False,
-                        "pose": state.pose.copy(),
-                        "result": {
-                            "ok": reached,
-                            "legs": [
-                                {
-                                    "reached": reached,
-                                    "position_error": 0.0 if reached else 1.0,
-                                    "yaw_error": 0.0,
-                                    "time": 1.0,
-                                }
-                            ],
-                        },
-                        "log": ["arrived" if reached else "stopped or skipped"],
-                    }
-                    if state.final_mutator:
-                        state.final_mutator(result)
-                    return httpx.Response(200, json=result)
-            raise AssertionError(
-                f"unexpected service request: {request.method} {request.url}"
-            )
-
-    with httpx.Client(transport=httpx.MockTransport(response)) as client:
-        yield SimpleNamespace(
-            state=state,
-            nav=NavigationClient("http://nav.test", client=client),
-            sim=SimulationClient("http://sim.test", client=client),
-            handle=response,
-        )
 
 
 @contextmanager
@@ -276,19 +66,47 @@ def serve_mcp():
 
 
 @pytest.fixture
-def mcp_navigation(navigation_services):
-    """Expose the real MCP adapters in front of offline backend responses."""
-    from robots.unitree.mcp.astar.server import create_astar_mcp
-    from robots.unitree.mcp.mujoco.server import create_mujoco_mcp
-    from rpent.tools.mcp_client import McpClient, McpServerConfig
+def mcp_navigation():
+    """Provide MCP-only backends to exercise RPent's ordinary CLI interface."""
+    astar = FastMCP("test-astar", stateless_http=True, json_response=True)
+    sim = FastMCP("test-mujoco", stateless_http=True, json_response=True)
+    state = SimpleNamespace(plans={}, submissions=[])
+    readonly = ToolAnnotations(readOnlyHint=True)
+    waypoint = {
+        "id": "wp_01",
+        "name": "广告牌",
+        "stand_pose": {"x": 1, "y": 0, "yaw": 0},
+    }
 
-    astar = create_astar_mcp(navigation_services.nav, host="127.0.0.1", port=0)
-    with (
-        run_mcp(astar) as astar_url,
-        closing(McpClient("astar", McpServerConfig(url=astar_url))) as planner,
-    ):
-        sim = create_mujoco_mcp(
-            navigation_services.sim, planner, host="127.0.0.1", port=0, walk_timeout_s=1
-        )
-        with run_mcp(sim) as sim_url:
-            yield SimpleNamespace(astar_url=astar_url, sim_url=sim_url)
+    @astar.tool(annotations=readonly)
+    def list_waypoints() -> dict[str, Any]:
+        return {"ok": True, "waypoints": [waypoint]}
+
+    @astar.tool(annotations=readonly)
+    def plan_route(start: dict, goal: str) -> dict[str, Any]:
+        assert goal == "wp_01"
+        state.plans["plan_1"] = {
+            "legs": [{"path": [[start["x"], start["y"]], [1.0, 0.0]]}]
+        }
+        return {"ok": True, "plan_id": "plan_1"}
+
+    @sim.tool(annotations=readonly)
+    def get_pose() -> dict[str, Any]:
+        return {"ok": True, "x": 0.0, "y": 0.0, "yaw": 0.0, "fallen": False}
+
+    @sim.tool()
+    def follow_plan(plan_id: str) -> dict[str, Any]:
+        state.submissions.append(state.plans[plan_id])
+        return {
+            "ok": True,
+            "navigation_completed": True,
+            "walk_id": "walk_1",
+            "pose": {"x": 1.0, "y": 0.0, "yaw": 0.0},
+        }
+
+    @sim.tool(annotations=readonly)
+    def get_walk_status() -> dict[str, Any]:
+        return {"state": "finished"}
+
+    with run_mcp(astar) as astar_url, run_mcp(sim) as sim_url:
+        yield SimpleNamespace(astar_url=astar_url, sim_url=sim_url, state=state)

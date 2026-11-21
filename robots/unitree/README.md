@@ -9,13 +9,11 @@ bash run_rpent.sh '查询 Go2 当前位姿'
 
 在 RPent 仓库根目录运行。脚本加载私有 `.env.local` 和默认的 `mcp.toml`。用 `RPENT_MCP_CONFIG` 选择其他 MCP 配置，直接运行 RPent CLI 时用 `--mcp-config` 指定配置。
 
-| 服务 | MCP 入口 | 使用说明 |
+| 服务 | 默认 MCP 地址 | 使用说明 |
 | --- | --- | --- |
-| A* | [mcp/astar/server.py](mcp/astar/server.py) | [地图规划](MUJOCO_USAGE.zh-CN.md) |
-| MuJoCo | [mcp/mujoco/server.py](mcp/mujoco/server.py) | [仿真执行](MUJOCO_USAGE.zh-CN.md) |
-| LightNav | [mcp/vln/server.py](mcp/vln/server.py) | [视觉导航](VLN_USAGE.zh-CN.md) |
-| 任务调度 | [rpent.mcp.task.server](../../rpent/mcp/task/server.py) | [DSH 接入](TASK_MCP.zh-CN.md) |
+| A* | `http://127.0.0.1:8790/mcp` | [地图规划](MUJOCO_USAGE.zh-CN.md) |
+| MuJoCo | `http://127.0.0.1:8791/mcp` | [仿真执行](MUJOCO_USAGE.zh-CN.md) |
+| LightNav | `http://127.0.0.1:8792/mcp` | [视觉导航](VLN_USAGE.zh-CN.md) |
+| RPent 任务入口 | `http://127.0.0.1:8780/mcp` | [DSH 接入](TASK_MCP.zh-CN.md) |
 
-A* 和 MuJoCo 转接服务使用 Streamable HTTP。LightNav 转接程序使用 stdio，由 RPent 为每条任务启动。
-
-直接运行 RPent CLI 并启用上述 stdio 配置时，将 `RPENT_TASK_OUTPUT_DIR` 设为 `--output-dir` 对应的绝对路径。使用 `run_rpent.sh` 时脚本会自动设置。
+三个下游服务在各自仓库启动，RPent 根据 `mcp.toml` 通过 Streamable HTTP 发现和调用工具。默认启用 A* 和 MuJoCo，使用视觉导航时启用 `mcp_servers.vln`。

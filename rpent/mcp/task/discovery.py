@@ -94,6 +94,11 @@ def _discover(
                 name, bounded, env_overrides={"RPENT_TASK_OUTPUT_DIR": output_dir}
             )
         ) as client:
+            if config.run_report_tool is not None:
+                try:
+                    client.require_readonly_tool(config.run_report_tool)
+                except McpServiceError as exc:
+                    return _Discovery(error=str(exc))
             selected = set(
                 client.tools if config.enabled_tools is None else config.enabled_tools
             )

@@ -30,11 +30,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import mkdtemp
 from typing import Any
+from uuid import uuid4
 
 import tomlkit
 
 from rpent.evaluation import write_json_atomic
 from rpent.mcp.task.config import TaskDeployment
+from rpent.mcp.task.reports import collect_run_evidence
 from rpent.robots.robot_spec import TaskEvidence
 from rpent.utils.logging import get_logger
 
@@ -143,6 +145,7 @@ class TaskRunner:
             log_file.touch()
             job = _Job(
                 record={
+                    "run_id": uuid4().hex,
                     "robot_id": self.deployment.robot.id,
                     "instruction": instruction,
                     "status": "starting",
@@ -172,6 +175,7 @@ class TaskRunner:
                     RPENT_DISPATCH_ADAPTER=self.deployment.robot.adapter,
                     RPENT_DISPATCH_MCP_CONFIG=str(mcp_config),
                     RPENT_DISPATCH_OUTPUT_DIR=str(output_dir),
+                    RPENT_MCP_RUN_ID=job.record["run_id"],
                 )
                 with log_file.open("ab", buffering=0) as output:
                     job.process = subprocess.Popen(
@@ -212,18 +216,31 @@ class TaskRunner:
     def _watch(self, job: _Job) -> None:
         assert job.process is not None
         exit_code = job.process.wait()
+        record = job.record
+        try:
+            output = Path(record["output_dir"])
+            transcripts = sorted(output.glob("transcript_*.json"))
+            transcript = _read_json(transcripts[-1]) if transcripts else {}
+            read_evidence = self.deployment.execution.read_evidence
+            initial = (
+                read_evidence(output, transcript) if read_evidence else TaskEvidence()
+            )
+            evidence = collect_run_evidence(
+                self.deployment.servers,
+                output,
+                record["run_id"],
+                timeout_s=min(self._stop_timeout_s, 18),
+                initial=initial,
+            )
+        except Exception:
+            logger.exception("Cannot collect result for task in %s", job.directory)
+            transcript = {}
+            evidence = TaskEvidence(
+                requires_attention=True,
+                stop_error="cannot collect terminal task evidence",
+            )
         with self._lock:
             try:
-                record = job.record
-                output = Path(record["output_dir"])
-                transcripts = sorted(output.glob("transcript_*.json"))
-                transcript = _read_json(transcripts[-1]) if transcripts else {}
-                read_evidence = self.deployment.execution.read_evidence
-                evidence = (
-                    read_evidence(output, transcript)
-                    if read_evidence
-                    else TaskEvidence()
-                )
                 finish = transcript.get("finish") or {}
                 record.update(
                     finish=transcript.get("finish"),
@@ -239,7 +256,7 @@ class TaskRunner:
                     or (
                         record["stop_requested"]
                         and self.deployment.robot.environment == "real"
-                        and read_evidence is None
+                        and self.deployment.execution.read_evidence is None
                     )
                 ):
                     status = "requires_attention"

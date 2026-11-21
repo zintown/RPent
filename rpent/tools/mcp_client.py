@@ -64,6 +64,7 @@ class McpServerConfig(BaseModel):
     startup_timeout_sec: float = Field(default=5, gt=0, allow_inf_nan=False)
     tool_timeout_sec: float = Field(default=10, gt=0, allow_inf_nan=False)
     bearer_token_env_var: str | None = None
+    run_report_tool: str | None = Field(default=None, min_length=1)
 
     @field_validator("url")
     @classmethod
@@ -97,6 +98,10 @@ class McpServerConfig(BaseModel):
                 raise ValueError("stdio requires a command")
             if self.url is not None or self.bearer_token_env_var is not None:
                 raise ValueError("url and bearer_token_env_var apply to HTTP MCP")
+            if self.run_report_tool is not None:
+                raise ValueError(
+                    "run_report_tool requires a persistent HTTP MCP service"
+                )
         else:
             if self.url is None:
                 raise ValueError("streamable-http requires a url")
@@ -225,9 +230,11 @@ class McpClient:
         config: McpServerConfig,
         *,
         env_overrides: Mapping[str, str] | None = None,
+        run_id: str | None = None,
     ) -> None:
         self.name = name
         self._timeout = config.tool_timeout_sec
+        self._run_id = run_id
         environment = ChainMap(env_overrides or {}, os.environ)
         headers = {}
         if config.bearer_token_env_var is not None:
@@ -253,6 +260,10 @@ class McpClient:
     async def _call(self, name: str, arguments: dict[str, Any]) -> types.CallToolResult:
         try:
             with fail_after(self._timeout):
+                if self._run_id is not None:
+                    return await self._session.call_tool(
+                        name, arguments, meta={"rpent.dev/run-id": self._run_id}
+                    )
                 return await self._session.call_tool(name, arguments)
         except Exception as exc:
             raise McpServiceError(
@@ -283,6 +294,18 @@ class McpClient:
         """Release the MCP session and its worker."""
         self._connections.close()
 
+    def require_readonly_tool(self, name: str) -> None:
+        """Validate a configured reporting tool before using it."""
+        definition = self.tools.get(name)
+        if not (
+            definition
+            and definition.annotations
+            and definition.annotations.readOnlyHint
+        ):
+            raise McpServiceError(
+                f"{self.name}.{name} must be an exported read-only tool"
+            )
+
 
 def _tool_name(server: str, remote_name: str) -> str:
     name = f"mcp__{server}__{remote_name}"
@@ -296,10 +319,15 @@ def _invoke(
     client: McpClient,
     name: str,
     check_cancelled: Callable[[], None],
+    action_marker: Path | None,
     /,
     **arguments: Any,
 ) -> ToolResult:
     try:
+        check_cancelled()
+        if action_marker is not None:
+            action_marker.parent.mkdir(exist_ok=True)
+            action_marker.touch()
         result = client.call_tool(name, arguments, check_cancelled=check_cancelled)
     except McpServiceError as exc:
         return ToolResult(data={"error": str(exc)})
@@ -335,25 +363,41 @@ def discover_mcp_tools(
 ) -> list[Tool]:
     """Connect enabled servers and build declarations from their JSON Schemas."""
     declarations = []
+    run_id = os.environ.get("RPENT_MCP_RUN_ID")
+    output = os.environ.get("RPENT_TASK_OUTPUT_DIR")
     for name, config in servers.items():
         if not config.enabled or config.enabled_tools == []:
             continue
-        client = McpClient(name, config)
+        client = McpClient(
+            name, config, run_id=run_id if config.run_report_tool else None
+        )
         connections.callback(client.close)
+        if config.run_report_tool is not None:
+            client.require_readonly_tool(config.run_report_tool)
         selected = (
             client.tools if config.enabled_tools is None else config.enabled_tools
         )
         for raw_name in selected:
+            if raw_name == config.run_report_tool:
+                continue
             definition = client.tools.get(raw_name)
             if definition is None:
                 raise ValueError(f"MCP server {name!r} does not export {raw_name!r}")
             Draft202012Validator.check_schema(definition.inputSchema)
+            readonly = (
+                definition.annotations and definition.annotations.readOnlyHint is True
+            )
+            marker = (
+                Path(output) / ".mcp-actions" / name
+                if run_id and output and config.run_report_tool and not readonly
+                else None
+            )
             declarations.append(
                 Tool(
                     name=_tool_name(name, raw_name),
                     description=definition.description or raw_name,
                     args_schema=None,
-                    handler=partial(_invoke, client, raw_name, check_cancelled),
+                    handler=partial(_invoke, client, raw_name, check_cancelled, marker),
                     _input_schema=definition.inputSchema,
                     capture_state=False,
                 )

@@ -9,6 +9,11 @@ description = "在已配置地图上规划路线，跟踪路径前往站位或�
 tools = ["astar.list_waypoints", "astar.plan_route", "mujoco.get_pose", "mujoco.follow_plan", "mujoco.get_walk_status"]
 checks = { "astar.list_waypoints" = { ok = true }, "mujoco.get_pose" = { fallen = false }, "mujoco.get_navigation_status" = { ready = true } }
 
+[capabilities.visual_navigation]
+description = "使用 Go2 第一视角执行局部视觉导航并确认停车。"
+tools = ["vln.run_vln_navigation", "vln.get_vln_status", "vln.stop_vln_navigation"]
+checks = { "vln.get_vln_readiness" = { ready = true } }
+
 [mcp_servers.astar]
 url = "http://127.0.0.1:8790/mcp"
 enabled_tools = ["list_waypoints", "plan_route"]
@@ -17,3 +22,11 @@ enabled_tools = ["list_waypoints", "plan_route"]
 url = "http://127.0.0.1:8791/mcp"
 enabled_tools = ["get_pose", "follow_plan", "get_walk_status"]
 tool_timeout_sec = 150
+run_report_tool = "get_run_report"
+
+[mcp_servers.vln]
+url = "http://127.0.0.1:8792/mcp"
+enabled = false
+enabled_tools = ["run_vln_navigation", "get_vln_status", "stop_vln_navigation"]
+tool_timeout_sec = 155
+run_report_tool = "get_run_report"

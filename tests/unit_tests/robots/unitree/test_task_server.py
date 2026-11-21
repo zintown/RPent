@@ -45,13 +45,6 @@ mode = os.environ.get("RPENT_TEST_MODE", "success")
 output = Path(os.environ["RPENT_DISPATCH_OUTPUT_DIR"])
 with (root / "launches.jsonl").open("a") as handle:
     handle.write(json.dumps({"args": sys.argv[1:], "tty": sys.stdin.isatty()}) + "\n")
-navigation = {
-    "completed_navigation_goals": 3,
-    "active_walk_id": None,
-    "submission_uncertain": mode == "uncertain",
-    "stop_error": None,
-}
-(output / "states.json").write_text(json.dumps({"steps": [{"state": navigation}]}))
 if mode in ("wait", "force"):
     def stop(sig, frame):
         print("SIGINT cleanup completed", flush=True)
@@ -65,8 +58,20 @@ if mode in ("wait", "force"):
 finish = None if mode in ("budget", "incomplete", "crash") else {
     "status": "failure" if mode == "failure" else "success", "summary": "done"
 }
+messages = [{
+    "role": "tool", "name": "mcp__mujoco__follow_plan",
+    "content": json.dumps({"structured_content": {
+        "ok": True, "navigation_completed": True, "pose": {"x": goal}, "walk_id": f"walk_{goal}"
+    }}),
+} for goal in range(3)]
+if mode == "uncertain":
+    messages.append({
+        "role": "tool", "name": "mcp__vln__run_vln_navigation",
+        "content": json.dumps({"structured_content": {"ok": True, "submission_uncertain": True}}),
+    })
 (output / "transcript_unitree_fake.json").write_text(json.dumps({
-    "finish": finish, "error": None, "stats": {"turns_used": 16 if mode == "budget" else 9}
+    "finish": finish, "error": None, "messages": messages,
+    "stats": {"turns_used": 16 if mode == "budget" else 9}
 }))
 if mode == "budget":
     print("Request budget of 16 reached.", flush=True)
@@ -197,25 +202,6 @@ Path("actual-args.json").write_text(json.dumps(vars(args)))
         os.environ["RPENT_TEST_MODE"] = "success"
         self.assertEqual(
             runner.wait(runner.start("next instruction"), 6)["status"], "succeeded"
-        )
-
-    def test_final_result_uses_newest_state_or_cleanup_report(self):
-        os.environ["RPENT_TEST_MODE"] = "wait"
-        runner = self.runner()
-        job = runner.start("test")
-        self.wait_ready()
-        [output] = self.jobs.glob("*/output")
-        state_path = output / "states.json"
-        state_time = state_path.stat().st_mtime_ns
-        report_path = output / "navigation" / "walks" / "latest.json"
-        report_path.parent.mkdir(parents=True)
-        report_path.write_text(
-            json.dumps({"completed_navigation_goals": 4, "error": None})
-        )
-        os.utime(report_path, ns=(state_time + 1, state_time + 1))
-        runner.cancel(job)
-        self.assertEqual(
-            runner.wait(job, 6)["navigation"]["completed_navigation_goals"], 4
         )
 
     def test_forced_stop_requires_attention_and_blocks_new_motion(self):

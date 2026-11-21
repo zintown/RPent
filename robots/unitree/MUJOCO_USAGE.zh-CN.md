@@ -4,20 +4,22 @@ RPent 通过 A* MCP 查询点位和规划路径，再把 `plan_id` 交给 MuJoCo
 
 ## 启动 A* 和 MuJoCo MCP
 
-启动现有 A* 和 MuJoCo HTTP 服务，确认两者的 `map_id`、`map_version` 一致，且仿真已经运行。以下示例使用本机的 `8765` 和 `8770`。在 RPent 仓库目录打开两个终端，使用已安装 RPent 的 Python 环境分别启动。
+启动 A* 和 MuJoCo 后，在它们各自仓库启动 MCP。以下命令使用并列目录下的共享 Python 环境。从项目根目录分别在两个终端执行。
 
 ```bash
-../.venv/bin/python -m robots.unitree.mcp.astar.server \
+cd a
+../.venv/bin/python -m astar_mcp.server \
   --nav-endpoint http://127.0.0.1:8765 --port 8790
 ```
 
 ```bash
-../.venv/bin/python -m robots.unitree.mcp.mujoco.server \
+cd mujoco_sim
+../.venv/bin/python -m mujoco_mcp.server \
   --sim-endpoint http://127.0.0.1:8770 \
   --astar-mcp-url http://127.0.0.1:8790/mcp --port 8791
 ```
 
-仓库根目录的 [mcp.toml](../../mcp.toml) 已配置上述两个 MCP 端点和允许调用的能力。端口变更时，在配置中填写实际的 MCP 地址。
+RPent 的 [mcp.toml](../../mcp.toml) 已配置上述两个 MCP 端点和工具。端口变更时，在配置中填写实际的 MCP 地址。`get_navigation_status` 检查两侧的 `map_id` 和 `map_version` 并验证仿真控制器空闲。
 
 `follow_plan` 等待实际行走完成。它的默认行走预算为 120 秒，可用 MuJoCo MCP 的 `--walk-timeout-s` 调整。同步把 `tool_timeout_sec` 设得比行走预算加清理时间更长。
 
@@ -61,15 +63,6 @@ curl --noproxy '*' -fsS http://127.0.0.1:8770/walk
 
 地图不一致或机器人摔倒时先处理仿真状态。动作回执丢失时，先查行走编号和原执行状态，再决定是否启动下一次任务。
 
-## 联合 LightNav 和检查底层服务
+## 联合 LightNav
 
-在仿真配置中加入 LightNav 可执行地图导航和视觉搜索，见 [LightNav 接入](VLN_USAGE.zh-CN.md)。
-
-需要检查 HTTP 端点和启动仿真器时，在当前 Bash 终端设置 `RPENT_NAV_ENDPOINT` 和 `RPENT_SIM_ENDPOINT` 后执行准备脚本。
-
-```bash
-source .env.local
-source robots/unitree/prepare_mujoco.sh --skip-install --start-simulator
-```
-
-脚本复用 `RPENT_VENV_DIR` 指定的环境，检查模型、地图、控制器、位姿和点位。`--start-simulator` 只在仿真器未运行时调用启动接口。
+在仿真配置中启用 LightNav 可执行地图导航和视觉搜索，见 [LightNav 接入](VLN_USAGE.zh-CN.md)。仿真启停由 `mujoco_sim/scripts/run_robot_mujoco.sh` 管理。RPent 使用 `rpent mcp --mcp-config mcp.toml test mujoco` 检查 MCP 连接。

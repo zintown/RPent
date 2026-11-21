@@ -45,12 +45,11 @@ def test_unitree_requires_a_configured_service_with_tools(tmp_path, enabled, all
 
 
 def test_public_cli_discovers_services_plans_and_follows_the_exact_route(
-    tmp_path, mcp_navigation, navigation_services, monkeypatch
+    tmp_path, mcp_navigation, monkeypatch
 ):
     from rpent.cli import main as cli
 
-    services = navigation_services
-    services.state.polls_before_finish = 0
+    services = mcp_navigation
     config_path = tmp_path / "mcp.toml"
     config_path.write_text(
         f'[mcp_servers.astar]\nurl = "{mcp_navigation.astar_url}"\n'
