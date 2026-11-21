@@ -91,8 +91,12 @@ class TaskServerTest(unittest.TestCase):
         )
         self.jobs = self.root / "jobs"
         config = self.root / "mcp.toml"
-        config.write_text("[mcp_servers]\n")
-        self.deployment = load_deployment(config, legacy_unitree=True)
+        config.write_text(
+            '[robot]\nid = "go2-test"\ntype = "unitree.go2"\n'
+            'environment = "simulation"\nadapter = "unitree"\n'
+            "[mcp_servers]\n"
+        )
+        self.deployment = load_deployment(config)
         self.mode = patch.dict(os.environ, {"RPENT_TEST_MODE": "success"})
         self.mode.start()
         self.addCleanup(self.mode.stop)

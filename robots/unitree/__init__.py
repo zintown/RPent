@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unitree command RPC integration."""
+"""Unitree Go2 仿真适配器。"""
 
 from robots.unitree.robot_spec import get_robot_spec, get_toolkit
 

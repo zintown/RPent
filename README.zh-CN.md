@@ -114,8 +114,7 @@ RPent 面向以下四类用户：
 
 ## 快速开始
 
-宇树命令 RPC 接入验证可使用本地假接收端在 CPU 上运行，详见
-[Unitree 命令接入](robots/unitree/README.md)。
+[Unitree Go2 仿真接入](robots/unitree/README.md)
 
 **1. 选择一个环境并安装 RPent。**
 

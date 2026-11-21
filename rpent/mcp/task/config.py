@@ -35,7 +35,7 @@ class RobotIdentity(BaseModel):
 
     id: RobotName
     type: RobotName
-    environment: Environment | None
+    environment: Environment
     adapter: Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]*$")] = "mcp"
 
 
@@ -72,20 +72,12 @@ def load_deployment(
     *,
     robot_id: str | None = None,
     environment: Environment | None = None,
-    legacy_unitree: bool = False,
 ) -> TaskDeployment:
     """Load one deployment and resolve its natural-language execution adapter."""
     path = path.expanduser().resolve()
     with path.open("rb") as handle:
         config = tomllib.load(handle)
     identity = config.get("robot")
-    if identity is None and legacy_unitree:
-        identity = {
-            "id": "go2-01",
-            "type": "unitree.go2",
-            "environment": None,
-            "adapter": "unitree",
-        }
     if not isinstance(identity, dict):
         raise ValueError(f"{path} must contain a [robot] table")
     identity = dict(identity)

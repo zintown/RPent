@@ -24,7 +24,7 @@ if [[ $# -eq 1 && "$1" == '--help' ]]; then
   RPENT_RUNS_DIR                  运行输出父目录，默认 logs
   RPENT_MEMORY_DIR                可选独立本地记忆目录
 
-仿真说明：robots/unitree/MUJOCO_USAGE.zh-CN.md。
+Go2 仿真使用说明见 robots/unitree/README.md。
 HELP
     exit 0
 fi

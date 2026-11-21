@@ -43,7 +43,7 @@ class RobotInfo(BaseModel):
 
     robot_id: str
     robot_type: str
-    environment: Environment | None
+    environment: Environment
     state: RobotState
     capabilities: list[CapabilityInfo]
     service_errors: dict[str, str] = Field(default_factory=dict)

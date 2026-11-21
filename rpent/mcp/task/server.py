@@ -43,7 +43,6 @@ def create_app(
     robot_id: str | None = None,
     environment: Environment | None = None,
     mcp_allowed_hosts: list[str] | None = None,
-    legacy_unitree: bool = False,
 ) -> FastAPI:
     """Build the MCP task service; own its runner and session manager in the lifespan."""
     root = repo_root or get_repo_root()
@@ -52,7 +51,6 @@ def create_app(
         root / path.expanduser(),
         robot_id=robot_id,
         environment=environment,
-        legacy_unitree=legacy_unitree,
     )
 
     @asynccontextmanager
@@ -101,7 +99,7 @@ def create_app(
     return app
 
 
-def main(argv: list[str] | None = None, *, legacy_unitree: bool = False) -> None:
+def main(argv: list[str] | None = None) -> None:
     """Serve one worker on the RPent host, using server-side configuration."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="127.0.0.1")
@@ -137,7 +135,6 @@ def main(argv: list[str] | None = None, *, legacy_unitree: bool = False) -> None
             robot_id=args.robot_id,
             environment=args.environment,
             mcp_allowed_hosts=args.mcp_allowed_host,
-            legacy_unitree=legacy_unitree,
         )
     except (OSError, ValueError) as exc:
         parser.error(str(exc))

@@ -1,171 +1,70 @@
-# 在现有 Go2 仿真中运行 LightNav VLN
+# LightNav 视觉导航
 
-LightNav 根据第一视角图像和文字指令预测局部航点。VLN MCP 服务内部持续取图、
-推理并转发航点，由现有 Go2 仿真服务完成坐标转换、MPC 和步态控制。
-A* 继续负责地图路径规划；同一台 Go2 每次只执行一种导航方式。
+LightNav 从 Go2 第一视角和文字指令预测局部航点。视觉导航 MCP 在一次调用内完成取图、推理、航点下发和停车确认。Go2 的地图行走和视觉导航串行执行。
 
-## 服务与环境
+## 启动视觉导航服务
 
-本机源码、权重、地图和 Python 环境均位于 `/home/yanlinjie/robot_project`。
-四个组件共用 `.venv`；MuJoCo 保留 3.3.6，没有运行 LightNav 的 TurtleBot 演示。
-
-| 服务 | 地址 | 职责 |
-| --- | --- | --- |
-| LightNav | `ws://127.0.0.1:8050` | `login/reset/next`，返回局部航点和模型 STOP |
-| A* | `http://127.0.0.1:8765` | 点位查询、地图路径规划 |
-| Go2 控制 | `http://127.0.0.1:8770` | `/walk` 或持续航点会话 |
-| Go2 观测 | `http://127.0.0.1:8771` | `/observation`、`/camera/front` |
-| VLN MCP | `http://127.0.0.1:8792/mcp` | 视觉导航闭环、只读状态和停车证据 |
-| RPent 任务 MCP | `http://127.0.0.1:8780/mcp` | DSH 调用 `run_task` 并接收最终结果 |
-
-现有推理依赖、Go2 仿真和 A* 应已准备好。已有共享环境时，仅需注册本地包：
+先启动[仿真和第一视角服务](MUJOCO_USAGE.zh-CN.md)。在 `lightnav` 仓库根目录启动模型。共享环境需安装 LightNav 及其 `mcp` 依赖，权重默认位于该仓库的 `checkpoints/LightNav-0`。安装、显卡和权重配置见 `lightnav/LOCAL_SERVICE.md`。
 
 ```bash
-cd /home/yanlinjie/robot_project
-uv pip install --offline --no-deps --no-build-isolation --python .venv/bin/python \
-  --editable ./lightnav --editable ./rpent
-uv pip check --python .venv/bin/python
+../.venv/bin/python scripts/run_vln_service.py start
+../.venv/bin/python scripts/run_vln_service.py status
 ```
 
-LightNav 仓库的 `mcp` extra 声明转接程序的依赖。模型加载和 GPU 运算发生在 LightNav 推理进程。
-
-## 启动与停止模型
-
-在项目根目录执行：
+状态返回 `ready:true` 后，在同一仓库的新终端启动 MCP。
 
 ```bash
-.venv/bin/python lightnav/scripts/run_vln_service.py start
-.venv/bin/python lightnav/scripts/run_vln_service.py status
-```
-
-默认使用物理 GPU 1、本地 `lightnav/checkpoints/LightNav-0`，监听回环地址 8050。
-首次加载和预热可能需要数分钟；`status` 的 `ready:true` 表示预热后 WebSocket
-探测成功。加载中返回退出码 1。日志为 `lightnav/output/vln-local/service.log`。
-启动器强制使用离线权重，沿用上游 `local_serve.py` 的单进程 HashStore 初始化。
-
-可在启动前设置 `VLN_CUDA_VISIBLE_DEVICES`、`VLN_MODEL_PATH`、`VLN_PORT` 和
-`VLN_GPU_MEMORY_UTILIZATION`；默认显存比例为 0.4。选择其他端口时，状态检查及
-VLN MCP 的 `--vln-endpoint` 也要使用相同配置。停止命令结束本启动器记录的模型进程。
-
-```bash
-.venv/bin/python lightnav/scripts/run_vln_service.py stop
-```
-
-仿真、A* 和 RPent 使用各自原有启停入口。模型服务关闭时，活动 VLN 工具会尝试
-确认停车；不能确认时保留待核对状态，禁止自动重放运动。
-
-## 启动和接入 LightNav MCP
-
-启动 [MuJoCo 仿真](MUJOCO_USAGE.zh-CN.md)和第一视角观测服务。从项目根目录进入 LightNav 仓库，启动常驻的视觉导航入口。
-
-```bash
-cd lightnav
 ../.venv/bin/python -m lightnav.navigation_mcp.server
 ```
 
-底层地址变化时，在配置的启动参数中设置 `--vln-endpoint`、`--observation-endpoint` 或 `--sim-endpoint`。`--vln-timeout-s` 默认 120 秒，`--vln-inference-timeout-s` 默认 3 秒。MCP 的 `tool_timeout_sec` 应留出 episode 结束后的停车与清理时间。
+MCP 默认为 `http://127.0.0.1:8792/mcp`，连接 8050 的推理服务、8770 的仿真控制和 8771 的第一视角。对应地址可用 `--vln-endpoint`、`--sim-endpoint`、`--observation-endpoint` 设置。可通过 `http://127.0.0.1:8771/camera/front` 查看第一视角。
 
-RPent 的 `mcp.toml` 已声明 `visual_navigation` 能力。在 `[mcp_servers.vln]` 中将 `enabled` 改为 `true`。如需区分仿真与视觉导航配置，可复制到 `mcp.vln.local.toml` 后修改并通过 `RPENT_MCP_CONFIG` 选择。示例中的 `run_report_tool` 用于查询本次任务的终态和停车证据。
+默认模型推理超时为 3 秒，视觉导航预算为 120 秒，可分别用 `--vln-inference-timeout-s` 和 `--vln-timeout-s` 调整。RPent 的 `tool_timeout_sec` 需覆盖视觉导航和停车清理。
 
-```toml
-[mcp_servers.vln]
-url = "http://127.0.0.1:8792/mcp"
-enabled = true
-enabled_tools = ["run_vln_navigation", "get_vln_status", "stop_vln_navigation"]
-tool_timeout_sec = 155
-run_report_tool = "get_run_report"
-```
+任务结束并确认停车后，可在前台终端按 `Ctrl+C` 停止 MCP。在 LightNav 仓库根目录执行 `../.venv/bin/python scripts/run_vln_service.py stop` 停止模型。
+
+## 在 RPent 中启用 VLN
+
+将 [mcp.toml](../../mcp.toml) 的 `[mcp_servers.vln]` 中的 `enabled` 改为 `true`。可复制到 `mcp.vln.local.toml` 后修改，从而按需选择是否启用 VLN。从 RPent 根目录执行以下示例时，使用启用了 VLN 的配置。
 
 ```bash
-bash run_rpent.sh \
-  '使用 VLN 保持当前地图位置并确认停车。先读取当前位置作为验收坐标。'
+export RPENT_VENV_DIR="$(cd .. && pwd)/.venv"
+export RPENT_MCP_CONFIG="$PWD/mcp.vln.local.toml"
+bash run_rpent.sh '先查询当前地图位姿，再用 VLN 保持原位并确认停车'
 ```
 
-通过 DSH 提交时，用启用了 VLN 的配置启动 [RPent 任务 MCP](TASK_MCP.zh-CN.md)。
+[通过 DSH 调用](TASK_MCP.zh-CN.md)时，任务服务也需加载这份配置。`get_robot_info()` 返回 `visual_navigation` 为 `ready` 后可调度视觉导航。
 
-已知坐标或地点可用 A* 到达。「前往客厅找垃圾桶」可以先用 A* 到已解析的客厅站位，停稳后再用 VLN 局部搜索。优先采用唯一的完整点位名称。明确指定仅用 A* 或仅用 VLN 时遵循该要求。局部搜索通常使用约 30 秒的预算，视觉指令只包含当前搜索阶段。房间范围与物体识别结果由实际观测验收。
+需要结合地图导航时，可先用 A* 到已确认的房间站位，停稳后再执行该处的视觉指令。局部搜索通常给约 30 秒。仅在已知视觉目标的地图站位时填写 `expected_goal`。原位停车可以用刚读取的位姿验收。
 
-## 工具和闭环
+## 工具和验收
 
-| 工具 | 行为 |
+| 工具 | 用途 |
 | --- | --- |
-| `run_vln_navigation(instruction, expected_goal=None, timeout_s=None)` | 一次调用内部循环，直到目标验收、模型 STOP、取消或失败 |
-| `get_vln_status()` | 最近一次会话、预测数量、控制权和停车证据 |
-| `get_vln_readiness()` | 检查仿真控制器、第一视角观测和 LightNav 连接 |
-| `stop_vln_navigation()` | 结束本工具拥有的控制会话并确认停车 |
+| `run_vln_navigation(instruction, expected_goal, timeout_s)` | 运行视觉导航直到目标验收、模型停车、取消或失败。后两个参数可省略 |
+| `get_vln_readiness()` | 检查仿真控制、第一视角和模型连接 |
+| `get_vln_status()` | 查询会话状态、预测次数和停车证据 |
+| `stop_vln_navigation()` | 结束调用方持有的视觉导航会话并确认停车 |
 
-`expected_goal` 是已知地图坐标 `{x,y,yaw?}`，不是给模型的局部航点。只能使用
-任务或实时点位表提供的坐标；位置验收阈值为 0.25 米，可选朝向阈值为 0.2 弧度。
-工具会在经过至少一轮真实预测后检查已知目标，并在停车后重新验收。
+每次推理输出的 `[前向米, 左向米, 逆时针弧度]` 航点与对应图像的 `stamp_ns` 和 `base_pose` 一起交给仿真控制。循环默认以 4 Hz 为目标，每次只保留一个在途推理请求。采集后超过 2 秒的预测会被丢弃，连续三次过期时结束会话并尝试停车。
 
-模型每次返回的全部 `[前向米, 左向米, 逆时针弧度]` 航点，与该次输入图像的
-`stamp_ns`、`base_pose` 一起交给 `/control/trajectory`。RPent 不生成速度命令，
-也不拿推理结束后的位姿替换采集位姿。默认按训练配置的 4 Hz 循环，每个连接
-只保留一个在途推理请求；新任务使用新的连接并执行 reset。
+已知目标在至少一次真实预测后检查，停车后再次用地图位姿验收。位置误差限 0.25 米，指定朝向时误差限 0.2 弧度。任务返回的 `evidence.navigation.vln` 包含三项独立证据。
 
-轨迹有效期仍是采集后 2 秒。超时预测被丢弃，不修改时间戳续期；连续三次过期、
-断连、MPC 错误、跌倒或任务超时均结束本次执行并尝试停车。旧会话不能停止新会话，
-无法确认的创建或停车结果需要核对，不能重复提交运动。
+| 字段 | 含义 |
+| --- | --- |
+| `model_stop` | 模型是否发出停车指令 |
+| `stop_confirmed` | 仿真是否确认停稳并释放控制权 |
+| `goal_verified` | 是否通过独立地图位姿验收 |
 
-模型 STOP、物理停车和目标验证分别记录：
+模型停车且停稳后，缺少已知验收位姿的任务报告 `verification_required`。取消后，RPent 通过 `get_run_report` 查询本次会话，将停车证据写入任务的 `job.json`。需要进一步排查时查看 LightNav 的 `output/vln-mcp`。
 
-- `model_stop`：模型是否输出 STOP。
-- `stop_confirmed`：仿真是否确认站稳并释放控制权。
-- `goal_verified`：是否通过独立地图位姿验收。
+## 验证
 
-没有已知验收坐标时，模型 STOP 后会停车并返回 `verification_required`，
-不会把它计入已验证目标或允许 RPent 报成功。上层任务应说明目标仍待验证。
-
-## MCP 任务状态
-
-LightNav 的 `get_run_report` 返回本次执行证据。任务正常结束时，RPent 在 `evidence.navigation.vln` 返回这些字段。取消后，RPent 将按本次执行查询的证据保存在任务目录的 `job.json`。
-
-```json
-{
-  "evidence": {
-    "navigation": {
-      "vln": {
-        "episode_id": "vln_...",
-        "state": "finished",
-        "predictions": 7,
-        "accepted_references": 7,
-        "latency_ms": 250.0,
-        "capture_age_s": 0.31,
-        "active_control_id": null,
-        "model_stop": false,
-        "stop_confirmed": true,
-        "goal_verified": true
-      }
-    }
-  }
-}
-```
-
-`state` 可为 `connecting`、`starting_control`、`observing`、`inferencing`、
-`tracking`、`waiting_fresh_prediction`、`stopping`、`finished`、
-`verification_required`、`cancelled` 或 `failed`。`finished` 表示已知目标验收
-及停车均通过。`control` 内有仿真步态、MPC 和实测运动反馈；`latest_frame` 是
-本地诊断文件路径，第一视角画面可通过 8771 的观测接口查看。
-
-已停车但目标未验证时，任务终态为 `verification_required`。控制权或停车状态不明时，任务终态为 `requires_attention`。LightNav 的诊断产物在其 `output/vln-mcp` 目录。
-
-## 验证与限制
-
-离线测试使用项目现有 pytest：
-
-```bash
-cd /home/yanlinjie/robot_project/rpent
-../.venv/bin/python -m pytest tests/unit_tests/robots/unitree -q
-```
-
-实际联调需要已经启动的 Go2、第一视角和 LightNav HTTP MCP，且仿真与现有 RPent 任务均空闲。
-以下检查通过任务 MCP 和 VLN MCP 控制仿真 Go2。
+在 Go2 仿真和 LightNav MCP 空闲时，从 RPent 根目录执行。测试覆盖原位停稳验收和运动中取消。上层工具顺序由本地脚本固定，第一视角、LightNav 推理和仿真控制实际运行。
 
 ```bash
 RPENT_RUN_UNITREE_VLN=1 ../.venv/bin/python -m pytest \
-  tests/e2e_tests/unitree/test_vln_policy_chain.py -q -s
+  tests/e2e_tests/unitree/test_vln_policy_chain.py -q
 ```
 
-它复用仓库的本地脚本规划器，只固定高层工具调用；LightNav 推理、Go2 图像、
-航点转换、MPC 和 DDS 均实际运行。覆盖保持当前已知地图位置并停车，以及运动中
-通过 MCP 取消后释放控制权。产物默认位于项目 `output/vln-integration/policy-chain/`。
+默认记录保存到项目根目录的 `output/vln-integration/policy-chain`。

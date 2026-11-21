@@ -1,10 +1,10 @@
-# RPent 任务 MCP
+# DSH 调度 Go2 仿真
 
-Unitree 使用 RPent 的通用任务 MCP。DSH 通过 `get_robot_info` 选择机器人，再调用 `run_task` 下发完整的自然语言指令。接入方式和能力配置见 [RPent 任务 MCP](../../rpent/mcp/task/README.zh-CN.md)。
+DSH 通过 RPent 的 `/mcp` 查询 Go2 的能力并下发整条任务。RPent 负责调用本机的仿真、规划和视觉导航工具。
 
 ## 启动服务
 
-在 RPent 仓库目录执行。示例绑定一台仿真 Go2，跨机器连接时，将监听地址和可信 Host 换成现场的局域网地址。
+使用默认配置时，分别启动 [A* 路径规划](ASTAR_USAGE.zh-CN.md) 和 [MuJoCo 仿真](MUJOCO_USAGE.zh-CN.md)。需要视觉导航时，按 [LightNav 指南](VLN_USAGE.zh-CN.md) 启用 VLN。接着在 RPent 根目录启动任务 MCP。下列命令使用本机连接。
 
 ```bash
 set -a
@@ -13,29 +13,34 @@ set +a
 export RPENT_VENV_DIR="$(cd .. && pwd)/.venv"
 
 "$RPENT_VENV_DIR/bin/python" -m rpent.mcp.task.server \
-  --mcp-config "$PWD/mcp.toml" \
-  --host 192.168.10.21 --port 8780 \
-  --mcp-allowed-host go2-01.lan:8780 \
-  --robot-id go2-01 \
-  --jobs-dir output/task-mcp/jobs
+  --mcp-config "${RPENT_MCP_CONFIG:-$PWD/mcp.toml}" \
+  --host 127.0.0.1 --port 8780 \
+  --jobs-dir output/task-mcp/go2-01
 ```
 
-私有 `.env.local` 配置模型凭据和 `RPENT_RUNNER_TOKEN`。本机连接可将监听地址设为 `127.0.0.1`。 [仿真](MUJOCO_USAGE.zh-CN.md) · [LightNav](VLN_USAGE.zh-CN.md)
-
-`python -m robots.unitree.mcp.task.server` 也可以启动通用服务。原来只包含 `[mcp_servers]` 的配置可继续使用这个入口。为 DSH 提供环境与能力信息时，按以上各部署文档补充相应配置表。
+任务服务使用配置文件中的 `[robot]` 读取机器人身份和环境。使用自定义配置时，以 [mcp.toml](../../mcp.toml) 的 `[robot]` 为例，并在修改配置后重启任务服务。跨主机访问时，通过 `--host` 指定监听地址，通过 `--mcp-allowed-host` 指定 DSH 连接所用的主机名和端口，并在私有 `.env.local` 中设置 `RPENT_RUNNER_TOKEN`。
 
 ## 连接和调用
 
-在客户端填写 Streamable HTTP 地址 `http://go2-01.lan:8780/mcp`。通过 `Authorization: Bearer <令牌>` 传递与服务端相同的 `RPENT_RUNNER_TOKEN`。跨机器访问时，将 URL 中的主机和端口加入 `--mcp-allowed-host`。
+在 DSH 中添加 Streamable HTTP 服务，本机示例地址为 `http://127.0.0.1:8780/mcp`。从 DSH 命令行接入时，用 `DSH_MCP_URL` 指定地址，用 `DSH_MCP_NAME` 为节点命名，再通过 `--patch` 加载 `apps/cli/config/examples/mcp-http/client.cordis.yml`。若 RPent 设置了令牌，使用同目录的 `bearer.cordis.yml`，将 `DSH_MCP_TOKEN` 设为同一个值。
 
-`run_task` 的参数示例
+DSH 先调用 `get_robot_info()`，确认节点为 `idle` 且所需能力为 `ready`。再通过 `run_task(instruction)` 提交完整指令并等待终态。下面的示例只查询位姿。
 
 ```json
 {"instruction": "查询仿真 Go2 的当前位置，并报告位姿"}
 ```
 
-Unitree 的导航和 VLN 证据通过 `evidence.navigation` 返回，原调用方仍可读取 `navigation` 字段。`succeeded` 表示执行成功。`verification_required` 表示仍需验收，`requires_attention` 表示需要核对仿真控制状态。`output_dir` 位于 RPent 主机。
+每个 RPent 节点同时执行一条任务。DSH 的单次工具调用超时需覆盖 RPent 任务预算和停车清理时间。RPent 使用默认的 900 秒规划预算时，可将 `DSH_MCP_TOOL_TIMEOUT_MS` 设为 `960000`。
 
-同一服务同时执行一条指令。每次调用都会启动一次新执行。客户端通过 MCP 取消正在运行的调用时，RPent 会清理对应进程。`GET /healthz` 可检查 `busy` 和 `requires_attention`。
+## 查看结果和日志
 
-DSH 可在设置中按上述地址添加 MCP 服务，也可通过 `--patch` 加载普通客户端配置。将客户端单次工具调用超时设为大于 RPent 整任务预算的值。默认的 RPent 规划预算是 900 秒，DSH 可给这类调用配置 960,000 毫秒。
+`run_task` 返回任务终态、摘要、错误、执行证据和本机的 `output_dir`。Go2 的地图导航和 VLN 证据位于 `evidence.navigation`。
+
+| 终态 | 含义 |
+| --- | --- |
+| `succeeded` | 任务执行成功 |
+| `verification_required` | 已停车，目标仍需独立验收 |
+| `stopped` | 任务已取消并结束 |
+| `requires_attention` | 执行或停车状态仍需核对 |
+
+任务目录中的 `job.json` 保存终态和证据，`stdout.log` 保存执行日志。通过 MCP 取消后，可以从这两个文件核对停车结果。`GET /healthz` 返回节点占用和待核对状态。完整接口和配置字段见 [RPent 任务 MCP](../../rpent/mcp/task/README.zh-CN.md)。

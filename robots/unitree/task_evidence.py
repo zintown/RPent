@@ -14,7 +14,7 @@ from typing import Any
 from rpent.robots.robot_spec import TaskEvidence
 
 
-def read_evidence(output: Path, transcript: dict[str, Any]) -> TaskEvidence:
+def read_evidence(_output: Path, transcript: dict[str, Any]) -> TaskEvidence:
     """Read compact evidence from tool results recorded by the task process."""
     navigation: dict[str, Any] = {}
     for message in transcript.get("messages", []):
