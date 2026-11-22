@@ -22,7 +22,6 @@ def read_evidence(_output: Path, transcript: dict[str, Any]) -> TaskEvidence:
         if message.get("role") != "tool" or name not in {
             "mcp__mujoco__get_pose",
             "mcp__mujoco__follow_plan",
-            "mcp__vln__run_vln_navigation",
         }:
             continue
         try:
@@ -34,10 +33,6 @@ def read_evidence(_output: Path, transcript: dict[str, Any]) -> TaskEvidence:
             continue
         if name == "mcp__mujoco__get_pose":
             navigation["pose"] = result
-        elif name == "mcp__vln__run_vln_navigation":
-            navigation.update(
-                vln=result, pose=result.get("pose") or navigation.get("pose")
-            )
         elif result.get("navigation_completed") is True:
             navigation.update(
                 pose=result["pose"],
@@ -47,21 +42,4 @@ def read_evidence(_output: Path, transcript: dict[str, Any]) -> TaskEvidence:
                 )
                 + 1,
             )
-    vln = navigation.get("vln", {})
-    stop_error = vln.get("stop_error")
-    return TaskEvidence(
-        data={"navigation": navigation} if navigation else {},
-        requires_attention=bool(
-            vln.get("active_control_id")
-            or vln.get("submission_uncertain")
-            or stop_error
-        ),
-        verification_required=(
-            vln.get("state") == "verification_required" and not vln.get("error")
-        ),
-        error=(
-            vln.get("error")
-            or ("VLN navigation failed" if vln.get("state") == "failed" else None)
-        ),
-        stop_error=stop_error,
-    )
+    return TaskEvidence(data={"navigation": navigation} if navigation else {})

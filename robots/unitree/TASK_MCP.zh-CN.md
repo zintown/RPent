@@ -1,10 +1,10 @@
 # DSH 调度 Go2 仿真
 
-DSH 通过 RPent 的 `/mcp` 查询 Go2 的能力并下发整条任务。RPent 负责调用本机的仿真、规划和视觉导航工具。
+DSH 通过 RPent 的 `/mcp` 查询 Go2 的能力并下发整条任务。RPent 调用 A* 规划路线，并通过 MuJoCo 执行。
 
 ## 启动服务
 
-使用默认配置时，分别启动 [A* 路径规划](ASTAR_USAGE.zh-CN.md) 和 [MuJoCo 仿真](MUJOCO_USAGE.zh-CN.md)。需要视觉导航时，按 [LightNav 指南](VLN_USAGE.zh-CN.md) 启用 VLN。接着在 RPent 根目录启动任务 MCP。下列命令使用本机连接。
+使用默认配置时，分别启动 [A* 路径规划](ASTAR_USAGE.zh-CN.md) 和 [MuJoCo 仿真](MUJOCO_USAGE.zh-CN.md)。接着在 RPent 根目录启动任务 MCP。下列命令使用本机连接。
 
 ```bash
 set -a
@@ -34,12 +34,11 @@ DSH 先调用 `get_robot_info()`，确认节点为 `idle` 且所需能力为 `re
 
 ## 查看结果和日志
 
-`run_task` 返回任务终态、摘要、错误、执行证据和本机的 `output_dir`。Go2 的地图导航和 VLN 证据位于 `evidence.navigation`。
+`run_task` 返回任务终态、摘要、错误、执行证据和本机的 `output_dir`。Go2 的地图导航证据位于 `evidence.navigation`。
 
 | 终态 | 含义 |
 | --- | --- |
 | `succeeded` | 任务执行成功 |
-| `verification_required` | 已停车，目标仍需独立验收 |
 | `stopped` | 任务已取消并结束 |
 | `requires_attention` | 执行或停车状态仍需核对 |
 

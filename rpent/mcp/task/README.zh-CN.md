@@ -1,6 +1,6 @@
 # RPent 任务 MCP
 
-每台机器人上运行一个 RPent 任务服务。中心 DSH 按机器人地址接入其 Streamable HTTP `/mcp`。导航、VLN、定位和控制服务由本体 RPent 通过本地 MCP 配置发现和调用。
+每台机器人上运行一个 RPent 任务服务。中心 DSH 按机器人地址接入其 Streamable HTTP `/mcp`。RPent 通过本地 MCP 配置发现和调用规划、定位和控制服务。
 
 ## 配置和启动
 

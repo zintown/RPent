@@ -64,11 +64,6 @@ messages = [{
         "ok": True, "navigation_completed": True, "pose": {"x": goal}, "walk_id": f"walk_{goal}"
     }}),
 } for goal in range(3)]
-if mode == "uncertain":
-    messages.append({
-        "role": "tool", "name": "mcp__vln__run_vln_navigation",
-        "content": json.dumps({"structured_content": {"ok": True, "submission_uncertain": True}}),
-    })
 (output / "transcript_unitree_fake.json").write_text(json.dumps({
     "finish": finish, "error": None, "messages": messages,
     "stats": {"turns_used": 16 if mode == "budget" else 9}
@@ -135,7 +130,6 @@ class TaskServerTest(unittest.TestCase):
             ("incomplete", "incomplete"),
             ("failure", "failed"),
             ("crash", "failed"),
-            ("uncertain", "requires_attention"),
         ):
             with self.subTest(mode=mode):
                 os.environ["RPENT_TEST_MODE"] = mode
