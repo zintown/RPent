@@ -34,6 +34,10 @@ with documentation instead of assuming either is correct.
   robot discovery, and CLI help work without every robot extra installed.
 - Follow neighboring code for naming and structure, use the project logger,
   and follow CONTRIBUTING's type annotation and docstring conventions.
+- Start newly authored source files with a module docstring, imports, or code.
+  Add per-file copyright and license notices only when explicitly requested by
+  the user or required by the applicable license. Preserve existing notices
+  when editing or copying source files.
 - Write prose about current behavior and non-obvious constraints. Keep review
   exchanges and implementation history in PR discussions or migration notes.
   Translate meaning into natural Chinese and preserve technical identifiers.

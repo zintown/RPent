@@ -4,6 +4,8 @@
 
 ## 配置和启动
 
+在 RPent 仓库根目录运行 `../.venv/bin/python -m pip install -r requirements.txt`，将服务和基础依赖安装到共享虚拟环境。依赖版本由 `pyproject.toml` 管理。 [RPent 依赖](../../../requirements.txt)
+
 `mcp.toml` 同时声明机器人的身份、能力和 RPent 可用的本地服务。以下示例假设机械臂的 MCP 服务已经在本机 8792 端口运行。
 
 ```toml
