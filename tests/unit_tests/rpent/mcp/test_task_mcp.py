@@ -19,7 +19,7 @@ from anyio import fail_after
 from mcp import ClientSession, types
 from mcp.client.streamable_http import streamable_http_client
 
-from rpent.mcp.task.server import create_app
+from rpent.mcp.task.server import create_app, main
 
 TOKEN = "offline-test-token"
 URL = "http://127.0.0.1:8780"
@@ -89,14 +89,14 @@ def make_app(root: Path, **kwargs):
 
 
 @asynccontextmanager
-async def connect(app, path="/mcp"):
+async def connect(app, path="/mcp", *, url=URL, token=TOKEN):
     async with app.router.lifespan_context(app):
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app),
-            headers={"Authorization": "Bearer " + TOKEN},
-            base_url=URL,
+            headers={"Authorization": "Bearer " + token} if token else {},
+            base_url=url,
         ) as http:
-            async with streamable_http_client(URL + path, http_client=http) as (
+            async with streamable_http_client(url + path, http_client=http) as (
                 read,
                 write,
                 session_id,
@@ -297,3 +297,91 @@ def test_mcp_requires_token_and_rejects_untrusted_host(root):
                 assert response.headers["Mcp-Session-Id"]
 
     asyncio.run(run())
+
+
+def test_task_server_cli_configures_https(root, monkeypatch):
+    certificate = root / "server.crt"
+    private_key = root / "server.key"
+    options = {}
+
+    def serve(app, **kwargs):
+        options.update(kwargs)
+
+    monkeypatch.setattr("uvicorn.run", serve)
+    monkeypatch.setenv("RPENT_RUNNER_TOKEN", TOKEN)
+    main(
+        [
+            "--mcp-config",
+            str(root / "mcp.toml"),
+            "--host",
+            "192.0.2.10",
+            "--mcp-allowed-host",
+            "192.0.2.10:8780",
+            "--tls-certfile",
+            str(certificate),
+            "--tls-keyfile",
+            str(private_key),
+        ]
+    )
+
+    assert options == {
+        "host": "192.0.2.10",
+        "port": 8780,
+        "ssl_certfile": certificate,
+        "ssl_keyfile": private_key,
+    }
+
+
+@pytest.mark.parametrize("flag", ["--tls-certfile", "--tls-keyfile"])
+def test_task_server_cli_requires_both_tls_files(flag, capsys):
+    with pytest.raises(SystemExit) as error:
+        main([flag, "server.pem"])
+
+    assert error.value.code == 2
+    assert (
+        "--tls-certfile and --tls-keyfile must be supplied together"
+        in capsys.readouterr().err
+    )
+
+
+def test_task_server_cli_requires_token_or_opt_in_on_remote_host(monkeypatch, capsys):
+    monkeypatch.delenv("RPENT_RUNNER_TOKEN", raising=False)
+
+    with pytest.raises(SystemExit) as error:
+        main(["--host", "192.0.2.10"])
+
+    assert error.value.code == 2
+    assert "set RPENT_RUNNER_TOKEN or pass --no-token" in capsys.readouterr().err
+
+
+def test_task_server_cli_permits_remote_discovery_without_token_on_opt_in(
+    root, monkeypatch
+):
+    def serve(app, **kwargs):
+        async def run():
+            async with connect(app, url="http://go2.internal:8780", token=None) as (
+                session,
+                _http,
+                _info,
+                _session_id,
+            ):
+                tools = (await session.list_tools()).tools
+                assert [tool.name for tool in tools] == ["get_robot_info", "run_task"]
+
+        asyncio.run(run())
+
+    monkeypatch.setattr("uvicorn.run", serve)
+    monkeypatch.setenv("RPENT_RUNNER_TOKEN", TOKEN)
+    main(
+        [
+            "--mcp-config",
+            str(root / "mcp.toml"),
+            "--jobs-dir",
+            str(root / "jobs"),
+            "--host",
+            "192.0.2.10",
+            "--mcp-allowed-host",
+            "go2.internal:8780",
+            "--no-token",
+        ]
+    )

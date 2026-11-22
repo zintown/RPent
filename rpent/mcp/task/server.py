@@ -104,6 +104,15 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", default=8780, type=int)
+    parser.add_argument("--tls-certfile", type=Path, help="PEM certificate for HTTPS.")
+    parser.add_argument(
+        "--tls-keyfile", type=Path, help="Private key for the HTTPS certificate."
+    )
+    parser.add_argument(
+        "--no-token",
+        action="store_true",
+        help="Allow MCP requests without a Bearer token on a trusted network.",
+    )
     parser.add_argument(
         "--mcp-config",
         type=Path,
@@ -124,9 +133,15 @@ def main(argv: list[str] | None = None) -> None:
         "--jobs-dir", type=Path, help="default: <repo>/logs/http-runner"
     )
     args = parser.parse_args(argv)
-    token = os.environ.get("RPENT_RUNNER_TOKEN") or None
-    if args.host not in {"127.0.0.1", "::1", "localhost"} and token is None:
-        parser.error("set RPENT_RUNNER_TOKEN before binding a non-loopback address")
+    if (args.tls_certfile is None) != (args.tls_keyfile is None):
+        parser.error("--tls-certfile and --tls-keyfile must be supplied together")
+    token = None if args.no_token else os.environ.get("RPENT_RUNNER_TOKEN") or None
+    if args.host not in {"127.0.0.1", "::1", "localhost"} and not (
+        token or args.no_token
+    ):
+        parser.error(
+            "set RPENT_RUNNER_TOKEN or pass --no-token for a non-loopback address"
+        )
     try:
         app = create_app(
             jobs_dir=args.jobs_dir,
@@ -140,7 +155,13 @@ def main(argv: list[str] | None = None) -> None:
         parser.error(str(exc))
     import uvicorn
 
-    uvicorn.run(app, host=args.host, port=args.port)
+    uvicorn.run(
+        app,
+        host=args.host,
+        port=args.port,
+        ssl_certfile=args.tls_certfile,
+        ssl_keyfile=args.tls_keyfile,
+    )
 
 
 if __name__ == "__main__":

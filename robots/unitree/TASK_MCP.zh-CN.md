@@ -18,11 +18,11 @@ export RPENT_VENV_DIR="$(cd .. && pwd)/.venv"
   --jobs-dir output/task-mcp/go2-01
 ```
 
-任务服务使用配置文件中的 `[robot]` 读取机器人身份和环境。使用自定义配置时，以 [mcp.toml](../../mcp.toml) 的 `[robot]` 为例，并在修改配置后重启任务服务。跨主机访问时，通过 `--host` 指定监听地址，通过 `--mcp-allowed-host` 指定 DSH 连接所用的主机名和端口，并在私有 `.env.local` 中设置 `RPENT_RUNNER_TOKEN`。
+任务服务使用配置文件中的 `[robot]` 读取机器人身份和环境。使用自定义配置时，以 [mcp.toml](../../mcp.toml) 的 `[robot]` 为例，并在修改配置后重启任务服务。跨主机测试可继续使用此仿真配置，启动参数见 [RPent 任务 MCP](../../rpent/mcp/task/README.zh-CN.md#配置和启动)。
 
 ## 连接和调用
 
-在 DSH 中添加 Streamable HTTP 服务，本机示例地址为 `http://127.0.0.1:8780/mcp`。从 DSH 命令行接入时，用 `DSH_MCP_URL` 指定地址，用 `DSH_MCP_NAME` 为节点命名，再通过 `--patch` 加载 `apps/cli/config/examples/mcp-http/client.cordis.yml`。若 RPent 设置了令牌，使用同目录的 `bearer.cordis.yml`，将 `DSH_MCP_TOKEN` 设为同一个值。
+DSH 与仿真同机时，通过 `--patch` 加载 `apps/cli/config/examples/rpent/local.cordis.yml`，连接 `http://127.0.0.1:8780/mcp`。跨主机时，加载同目录的 `remote.cordis.yml` 并通过 `DSH_RPENT_REMOTE_URL` 指定完整的 `/mcp` 地址。需要 Bearer 鉴权时，按 DSH 的 `apps/cli/config/examples/rpent/USAGE.zh-CN.md` 添加认证请求头。
 
 DSH 先调用 `get_robot_info()`，确认节点为 `idle` 且所需能力为 `ready`。再通过 `run_task(instruction)` 提交完整指令并等待终态。下面的示例只查询位姿。
 
@@ -30,7 +30,7 @@ DSH 先调用 `get_robot_info()`，确认节点为 `idle` 且所需能力为 `re
 {"instruction": "查询仿真 Go2 的当前位置，并报告位姿"}
 ```
 
-每个 RPent 节点同时执行一条任务。DSH 的单次工具调用超时需覆盖 RPent 任务预算和停车清理时间。RPent 使用默认的 900 秒规划预算时，可将 `DSH_MCP_TOOL_TIMEOUT_MS` 设为 `960000`。
+每个 RPent 节点同时执行一条任务。两份 DSH 配置的默认工具调用超时为 960 秒，覆盖 RPent 默认的 900 秒规划预算和停车清理时间。修改 RPent 预算后，可通过 `DSH_MCP_TOOL_TIMEOUT_MS` 调整对应的调用超时。
 
 ## 查看结果和日志
 

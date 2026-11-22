@@ -29,7 +29,9 @@ checks = { "arm.get_status" = { ready = true } }
 
 `tools` 中的引用对应 `服务名.工具名`，必须能从 RPent 的启用工具中发现。`checks` 指定无参、带 MCP `readOnlyHint` 的检查工具及预期返回值。检查工具可独立于规划器的工具白名单。`checks` 的字段名可以用点号读取嵌套对象，例如 `"camera.ready" = true`。地图导航的能力定义应覆盖定位、规划和路径跟踪。
 
-在 RPent 仓库根目录启动。示例的 IP、主机名和虚拟环境路径按现场部署更换。
+在 RPent 仓库根目录启动。与 DSH 同机仿真时，使用随仓库提供的 `mcp.toml` 并监听 `127.0.0.1`。远程连接使用 RPent 所在机器的可达地址，同一套仿真配置也可用于验证远程连接。部署到真机时，配置文件需要对应的真机适配器和下游 MCP 服务。
+
+以下是私网远程启动示例。将 IP、主机名、证书和虚拟环境路径换成部署环境的值。
 
 ```bash
 set -a
@@ -41,16 +43,20 @@ export RPENT_VENV_DIR="$(cd .. && pwd)/.venv"
   --mcp-config "$PWD/mcp.arm.local.toml" \
   --host 192.168.10.22 --port 8780 \
   --mcp-allowed-host arm-01.lan:8780 \
+  --tls-certfile /path/to/server.crt --tls-keyfile /path/to/server.key \
+  --no-token \
   --jobs-dir output/task-mcp/arm-01
 ```
 
-私有 `.env.local` 配置模型凭据和 `RPENT_RUNNER_TOKEN`。本机连接可监听 `127.0.0.1`。跨机器连接时，可信 Host 包含客户端所用地址的主机和端口。`--mcp-config` 可由 `RPENT_MCP_CONFIG` 指定，默认读取仓库的 `mcp.toml`。修改部署配置后重启任务服务，每条任务使用服务启动时读取的工具定义。
+私有 `.env.local` 配置模型凭据。本机监听默认可在未设置 `RPENT_RUNNER_TOKEN` 时接收请求。非回环地址默认要求 `RPENT_RUNNER_TOKEN`，也可在由私网或网关控制访问权限时显式传入 `--no-token`。该选项会关闭 MCP 的 Bearer 鉴权。可信 Host 包含客户端所用地址的主机和端口。`--mcp-config` 可由 `RPENT_MCP_CONFIG` 指定，默认读取仓库的 `mcp.toml`。修改部署配置后重启任务服务，每条任务使用服务启动时读取的工具定义。
+
+同时指定 `--tls-certfile` 和 `--tls-keyfile` 可启用 HTTPS。证书的备用名称须覆盖 DSH 访问时用的主机名或 IP。DSH 使用 Node.js 时，可在启动前通过 `NODE_EXTRA_CA_CERTS` 提供私有 CA 证书或自签名的服务端证书。
 
 同一机器人持续使用同一个任务目录。每次执行在其中创建独立的 `run-*/output` 和日志。不同机器人在一台主机测试时，分别配置端口和任务目录。
 
 ## DSH 调用
 
-为每个机器人添加一条普通 MCP 客户端配置，使用独立的 `serverName` 和 `http://<机器人主机>:8780/mcp`，按部署设置 `Authorization: Bearer <令牌>`。DSH 通过标准 MCP 工具列表发现以下工具。
+为每个机器人添加一条 MCP 客户端配置，使用独立的 `serverName`。按服务的监听方式选择 `https://<机器人主机>:8780/mcp` 或 `http://<机器人主机>:8780/mcp`，并按部署设置 `Authorization: Bearer <令牌>`。DSH 通过标准 MCP 工具列表发现以下工具。
 
 | 工具 | 行为 |
 | --- | --- |
