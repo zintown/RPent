@@ -78,6 +78,8 @@ export RPENT_VENV_DIR="$PWD/.venv"
 
 ## 添加本体服务
 
+开发下游服务时，参照 [RPent 下游 MCP 接口规范](DOWNSTREAM_MCP.zh-CN.md)。
+
 先启动服务的 MCP 接口，在该机器人的 `[mcp_servers]` 下注册它，然后在 `[capabilities]` 下声明能力及只读检查。按需把动作工具加入白名单。具备 MCP 工具的机器人可沿用 `mcp` 适配器。需要专用提示词或停车与验收证据时，在 `robots/<适配器>` 注册 `RobotSpec`，通过 `task_execution.read_evidence` 返回对应的结构化证据与结束条件。
 
 仿真和真机使用同一套 MCP 接入配置。通过 `--mcp-config` 选择部署文件，由 `[robot].environment` 描述运行环境，由 `[mcp_servers]` 指定实际连接的下游端点。下游服务实现并执行工具，RPent 发现工具、派发调用并读取回执。[Go2 仿真和真机配置](../../../robots/unitree/TASK_MCP.zh-CN.md)
