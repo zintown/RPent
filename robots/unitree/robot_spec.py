@@ -17,7 +17,7 @@ from rpent.robots.mcp_runtime import get_toolkit as get_toolkit
 from rpent.robots.mcp_runtime import mcp_robot_spec
 from rpent.robots.prompt_bundle import PromptBundle
 from rpent.robots.robot_spec import RobotSpec, TaskExecutionSpec
-from rpent.tools.mcp_client import McpMotionConfig, mcp_tool_name
+from rpent.tools.mcp_client import mcp_tool_name
 
 if TYPE_CHECKING:
     from rpent.mcp.task.config import TaskDeployment
@@ -45,23 +45,6 @@ def _configure_deployment(deployment: TaskDeployment) -> TaskDeployment:
         pose_servers &= declared_pose_servers
 
     follow_servers = _tool_servers(deployment, "follow_plan")
-    servers = dict(deployment.servers)
-    real = deployment.robot.environment == "real"
-    if real:
-        motion = McpMotionConfig(
-            tool="follow_plan",
-            readiness_tool="get_navigation_status",
-            stop_field="navigation.stop_confirmed",
-            completion_field="navigation.navigation_completed",
-        )
-        for name in sorted(follow_servers):
-            server = servers[name]
-            if server.enabled_tools is not None and server.run_report_tool is None:
-                raise ValueError(
-                    f"{name}.follow_plan requires run_report_tool for a real Go2"
-                )
-            servers[name] = server.model_copy(update={"motion": motion})
-
     execution = replace(
         deployment.execution,
         read_evidence=partial(
@@ -72,10 +55,9 @@ def _configure_deployment(deployment: TaskDeployment) -> TaskDeployment:
             follow_tools=frozenset(
                 mcp_tool_name(name, "follow_plan") for name in follow_servers
             ),
-            use_run_report=real,
         ),
     )
-    return replace(deployment, servers=servers, execution=execution)
+    return replace(deployment, execution=execution)
 
 
 def get_robot_spec() -> RobotSpec:

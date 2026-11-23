@@ -20,11 +20,9 @@ def read_evidence(
     *,
     pose_tools: frozenset[str],
     follow_tools: frozenset[str],
-    use_run_report: bool,
 ) -> TaskEvidence:
     """Read compact evidence from tool results recorded by the task process."""
     navigation: dict[str, Any] = {}
-    error = None
     tools = pose_tools | follow_tools
     for message in transcript.get("messages", []):
         name = message.get("name")
@@ -34,31 +32,16 @@ def read_evidence(
             data = json.loads(message.get("content", ""))
         except (TypeError, ValueError):
             continue
-        if not isinstance(data, dict):
-            continue
-        if use_run_report and name in follow_tools:
-            if data.get("motion_rejected") is True:
-                detail = data.get("error")
-                error = (
-                    detail
-                    if isinstance(detail, str)
-                    else "Go2 rejected navigation before execution"
-                )
-            continue
-        result = data.get("structured_content")
+        result = data.get("structured_content") if isinstance(data, dict) else None
         if not isinstance(result, dict) or result.get("ok") is not True:
             continue
         if name in pose_tools:
             navigation["pose"] = result
         elif result.get("navigation_completed") is True:
             navigation.update(
-                pose=result["pose"],
-                walk_id=result["walk_id"],
-                completed_navigation_goals=navigation.get(
-                    "completed_navigation_goals", 0
-                )
-                + 1,
+                (key, result[key]) for key in ("pose", "walk_id") if key in result
             )
-    return TaskEvidence(
-        data={"navigation": navigation} if navigation else {}, error=error
-    )
+            navigation["completed_navigation_goals"] = (
+                navigation.get("completed_navigation_goals", 0) + 1
+            )
+    return TaskEvidence(data={"navigation": navigation} if navigation else {})

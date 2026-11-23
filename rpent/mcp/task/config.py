@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -70,25 +70,7 @@ def load_deployment(
 ) -> TaskDeployment:
     """Load one deployment and resolve its natural-language execution adapter."""
     path = path.expanduser().resolve()
-    return _parse_deployment(read_mcp_config(path), path, robot_id, environment)
-
-
-def load_run_mcp_servers(path: Path) -> dict[str, McpServerConfig]:
-    """Apply a physical deployment's tool policy to CLI runs using its TOML."""
-    path = path.expanduser().resolve()
     config = read_mcp_config(path)
-    identity = config.get("robot")
-    if isinstance(identity, dict) and identity.get("environment") == "real":
-        return _parse_deployment(config, path).servers
-    return parse_mcp_servers(config, path)
-
-
-def _parse_deployment(
-    config: dict[str, Any],
-    path: Path,
-    robot_id: str | None = None,
-    environment: Environment | None = None,
-) -> TaskDeployment:
     identity = config.get("robot")
     if not isinstance(identity, dict):
         raise ValueError(f"{path} must contain a [robot] table")

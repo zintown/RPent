@@ -112,17 +112,17 @@ from mcp.types import ToolAnnotations
 server = FastMCP("probe")
 
 @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
-def get_pose() -> dict:
-    return {"ok": True, "age_s": 0.1, "map_version": "1"}
+def get_status() -> dict:
+    return {"ok": True, "state": "idle"}
 
 @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
-def get_navigation_status() -> dict:
-    return {"ready": False, "reason": "map_mismatch"}
+def get_dependency_status() -> dict:
+    return {"ready": False, "reason": "dependency_unavailable"}
 
 @server.tool()
-def follow_plan() -> str:
-    Path("followed").touch()
-    return "followed"
+def perform_action() -> str:
+    Path("acted").touch()
+    return "acted"
 
 server.run(transport="stdio")
 """
@@ -130,17 +130,17 @@ server.run(transport="stdio")
     path = tmp_path / "mcp.toml"
     options = ["--mcp-config", str(path)]
     assert (
-        main([*options, "add", "go2", "--cwd", ".", "--", sys.executable, "probe.py"])
+        main([*options, "add", "probe", "--cwd", ".", "--", sys.executable, "probe.py"])
         == 0
     )
-    assert main([*options, "test", "go2", "--check", "get_pose"]) == 0
-    assert '"map_version": "1"' in capsys.readouterr().out
-    assert main([*options, "test", "go2", "--check", "get_navigation_status"]) == 1
-    assert "map_mismatch" in capsys.readouterr().out
+    assert main([*options, "test", "probe", "--check", "get_status"]) == 0
+    assert '"state": "idle"' in capsys.readouterr().out
+    assert main([*options, "test", "probe", "--check", "get_dependency_status"]) == 1
+    assert "dependency_unavailable" in capsys.readouterr().out
     with pytest.raises(SystemExit) as error:
-        main([*options, "test", "go2", "--check", "follow_plan"])
+        main([*options, "test", "probe", "--check", "perform_action"])
     assert error.value.code == 2
-    assert not (tmp_path / "followed").exists()
+    assert not (tmp_path / "acted").exists()
 
 
 def test_concurrent_additions_preserve_each_server(tmp_path):

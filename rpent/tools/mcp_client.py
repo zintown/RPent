@@ -49,17 +49,6 @@ except ModuleNotFoundError:
     import tomli as tomllib
 
 
-class McpMotionConfig(BaseModel):
-    """Readiness tool and evidence fields for a reported movement."""
-
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    tool: str = Field(min_length=1)
-    readiness_tool: str = Field(min_length=1)
-    stop_field: str = Field(min_length=1)
-    completion_field: str = Field(min_length=1)
-
-
 class McpServerConfig(BaseModel):
     """Connection and tool visibility settings for one MCP server."""
 
@@ -77,7 +66,6 @@ class McpServerConfig(BaseModel):
     tool_timeout_sec: float = Field(default=10, gt=0, allow_inf_nan=False)
     bearer_token_env_var: str | None = None
     run_report_tool: str | None = Field(default=None, min_length=1)
-    motion: McpMotionConfig | None = None
 
     @field_validator("url")
     @classmethod
@@ -344,12 +332,10 @@ class McpClient:
                 f"{self.name}.{name} must be an exported read-only tool callable without arguments"
             )
 
-    def read_check(
-        self, name: str, *, check_cancelled: Callable[[], None] | None = None
-    ) -> dict[str, Any]:
+    def read_check(self, name: str) -> dict[str, Any]:
         """Call a read-only check with a short deadline and decode its object result."""
         self.require_readonly_tool(name)
-        result = self.call_tool(name, {}, check_cancelled=check_cancelled, timeout_s=8)
+        result = self.call_tool(name, {}, timeout_s=8)
         message = next(
             (
                 block.text
@@ -400,35 +386,17 @@ def _invoke(
     name: str,
     check_cancelled: Callable[[], None],
     action_marker: Path | None,
-    motion: McpMotionConfig | None,
     /,
     **arguments: Any,
 ) -> ToolResult:
-    attempted = False
     try:
         check_cancelled()
-        if motion is not None:
-            if action_marker is None:
-                raise McpServiceError(
-                    f"{client.name}.{name} requires a tracked task and a run_report_tool"
-                )
-            readiness = client.read_check(
-                motion.readiness_tool, check_cancelled=check_cancelled
-            )
-            if readiness.get("ready") is not True or readiness.get("ok") is False:
-                reason = readiness.get("reason") or "the controller is not ready"
-                raise McpServiceError(f"{client.name}.{name} refused because {reason}")
-            check_cancelled()
         if action_marker is not None:
             action_marker.parent.mkdir(exist_ok=True)
             action_marker.touch()
-        attempted = True
         result = client.call_tool(name, arguments, check_cancelled=check_cancelled)
     except McpServiceError as exc:
-        error_data: dict[str, Any] = {"error": str(exc)}
-        if motion is not None and not attempted:
-            error_data["motion_rejected"] = True
-        return ToolResult(data=error_data)
+        return ToolResult(data={"error": str(exc)})
     data: dict[str, Any] = {}
     images = []
     content = []
@@ -475,17 +443,9 @@ def discover_mcp_tools(
             readonly = (
                 definition.annotations and definition.annotations.readOnlyHint is True
             )
-            motion = (
-                config.motion
-                if config.motion and raw_name == config.motion.tool
-                else None
-            )
             marker = (
-                Path(output) / ".mcp-actions" / (f"{name}.motion" if motion else name)
-                if run_id
-                and output
-                and config.run_report_tool
-                and (motion or not readonly)
+                Path(output) / ".mcp-actions" / name
+                if run_id and output and config.run_report_tool and not readonly
                 else None
             )
             declarations.append(
@@ -493,9 +453,7 @@ def discover_mcp_tools(
                     name=mcp_tool_name(name, raw_name),
                     description=definition.description or raw_name,
                     args_schema=None,
-                    handler=partial(
-                        _invoke, client, raw_name, check_cancelled, marker, motion
-                    ),
+                    handler=partial(_invoke, client, raw_name, check_cancelled, marker),
                     _input_schema=definition.inputSchema,
                     capture_state=False,
                 )

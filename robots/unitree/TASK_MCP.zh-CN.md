@@ -22,7 +22,7 @@ export RPENT_VENV_DIR="$PWD/.venv"
 
 ## 接入 Go2 真机 MCP
 
-[mcp.go2.toml](../../mcp.go2.toml) 提供只读真机配置。将 `[mcp_servers.go2]` 的 `url` 指向已部署的 Go2 MCP。用 `--mcp-config mcp.go2.toml` 启动 RPent，任务目录可使用 `output/task-mcp/go2-real-01`。
+Go2 的下游服务实现 MCP 端点以及位姿、导航和执行回执工具。RPent 使用 [mcp.go2.toml](../../mcp.go2.toml) 连接该端点，示例配置开放位姿和导航状态查询。将 `[mcp_servers.go2]` 的 `url` 填为 Go2 MCP 地址，按下游实际提供的工具设置 `enabled_tools`。
 
 先在 RPent 环境中查询位姿和导航状态。
 
@@ -33,9 +33,9 @@ rpent mcp --mcp-config mcp.go2.toml test go2 --check get_navigation_status
 
 `get_pose` 在定位有效时返回 `ok = true`、`frame_id = "map"`、米制坐标 `x` 和 `y`、弧度航向 `yaw`、`age_s`、`map_id` 和 `map_version`。`get_navigation_status` 返回 `ready`，不可执行时使用 `reason` 说明原因。两个工具都应声明 `readOnlyHint = true`。定位有效时，DSH 从 `get_robot_info` 看到 `localization` 能力为 `ready`。
 
-接入导航后，在真机配置中登记 A*，加入 `map_navigation` 能力，并将 `follow_plan` 和 `get_walk_status` 加入 Go2 的工具白名单。为 Go2 配置 `run_report_tool = "get_run_report"` 和执行超时。RPent 在每次调用 `follow_plan` 前查询 `get_navigation_status`。Go2 应在该检查中确认定位、A* 地图版本及本体控制器状态。
+接入导航后，在真机配置中登记 A* 和 `map_navigation` 能力，并将下游提供的 `follow_plan` 和 `get_walk_status` 加入工具白名单。Go2 在执行路线前确认定位、地图版本和本体控制器状态，并在执行结束后确认到达和停稳。
 
-Go2 使用 RPent 传入的运行 ID 返回回执。终态回执以 `evidence.navigation.stop_confirmed = true` 确认停车，以 `navigation_completed = true` 确认导航完成。无法确认停车的动作进入 `requires_attention`。已确认停车但仍缺少到达证据的成功报告进入 `verification_required`。
+Go2 提供按运行 ID 查询的回执时，在 RPent 配置 `run_report_tool = "get_run_report"`。RPent 按任务 MCP 的通用回执格式读取执行证据。Go2 在回执中使用 `requires_attention` 表示停车状态待核对，使用 `verification_required` 表示需要独立验收。[RPent 回执格式](../../rpent/mcp/task/README.zh-CN.md#dsh-调用)
 
 ## 连接和调用
 

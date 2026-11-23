@@ -463,9 +463,9 @@ def main() -> int:
     try:
         args.mcp_servers = {}
         if args.mcp_config is not None:
-            from rpent.mcp.task.config import load_run_mcp_servers
+            from rpent.tools.mcp_client import load_mcp_servers
 
-            args.mcp_servers = load_run_mcp_servers(args.mcp_config)
+            args.mcp_servers = load_mcp_servers(args.mcp_config)
         if args.memory_repo is not None:
             from rpent.memory.source import parse_repo
 
