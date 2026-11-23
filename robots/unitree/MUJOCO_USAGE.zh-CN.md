@@ -1,18 +1,10 @@
 # MuJoCo 仿真服务
 
-MuJoCo 在 `mujoco_sim` 仓库中独立运行，提供 Go2 仿真运动、位姿和第一视角。默认 MCP 地址为 `http://127.0.0.1:8791/mcp`。
+MuJoCo 在 `mujoco-sim` 仓库中独立运行，提供 Go2 仿真运动、位姿和第一视角。默认 MCP 地址为 `http://127.0.0.1:8791/mcp`。
 
 ## 启动仿真
 
-按 `mujoco_sim/README.zh-CN.md` 准备仿真环境。从项目根目录运行下列命令。示例使用 `room1110/2026-11-11.2`。仿真已运行时，直接启动 MCP 即可。
-
-```bash
-cd mujoco_sim
-export ROBOT_MAP=room1110/2026-11-11.2
-export ROBOT_PYTHON="$PWD/../.venv/bin/python"
-bash scripts/run_robot_mujoco.sh start
-"$ROBOT_PYTHON" -m mujoco_mcp.server
-```
+在 `mujoco-sim` 仓库准备仿真环境并启动 MCP。 [MuJoCo 安装与启动](https://github.com/yanlinjie/mujoco-sim/blob/feat/mcp-interface/README.zh-CN.md)
 
 MuJoCo MCP 默认连接本机 8770 端口的仿真控制服务，可用 `--sim-endpoint` 修改。仿真第一视角由 8771 端口提供，可在浏览器打开 `http://127.0.0.1:8771/camera/front`。
 
@@ -21,7 +13,7 @@ MuJoCo MCP 默认连接本机 8770 端口的仿真控制服务，可用 `--sim-e
 在 [mcp.toml](../../mcp.toml) 的 `[mcp_servers.mujoco]` 配置仿真 MCP 地址。从 RPent 根目录检查 MuJoCo 的工具列表。
 
 ```bash
-../.venv/bin/rpent mcp --mcp-config mcp.toml test mujoco
+.venv/bin/rpent mcp --mcp-config mcp.toml test mujoco
 ```
 
 | 工具 | 输入和输出 |
@@ -47,4 +39,4 @@ curl --noproxy '*' -fsS http://127.0.0.1:8770/pose
 curl --noproxy '*' -fsS http://127.0.0.1:8770/walk
 ```
 
-仿真启停和状态查询由 `mujoco_sim/scripts/run_robot_mujoco.sh` 管理。回执丢失时，先根据行走编号核对执行和停车状态。
+在 `mujoco-sim` 仓库使用 `scripts/run_robot_mujoco.sh` 启停仿真或查询状态。回执丢失时，先根据行走编号核对执行和停车状态。

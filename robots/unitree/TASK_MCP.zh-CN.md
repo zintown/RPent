@@ -4,13 +4,13 @@ DSH 通过 RPent 的 `/mcp` 查询 Go2 的能力并下发整条任务。RPent �
 
 ## 启动服务
 
-使用默认配置时，分别启动 [A* 路径规划](ASTAR_USAGE.zh-CN.md) 和 [MuJoCo 仿真](MUJOCO_USAGE.zh-CN.md)。接着在 RPent 根目录启动任务 MCP。下列命令使用本机连接。
+先安装 RPent 并分别启动 A* 和 MuJoCo，再在 RPent 根目录运行任务 MCP。下列命令使用本机连接。 [RPent 安装](../../rpent/mcp/task/README.zh-CN.md#安装依赖) · [A* 路径规划](ASTAR_USAGE.zh-CN.md) · [MuJoCo 仿真](MUJOCO_USAGE.zh-CN.md)
 
 ```bash
 set -a
 source .env.local
 set +a
-export RPENT_VENV_DIR="$(cd .. && pwd)/.venv"
+export RPENT_VENV_DIR="$PWD/.venv"
 
 "$RPENT_VENV_DIR/bin/python" -m rpent.mcp.task.server \
   --mcp-config "${RPENT_MCP_CONFIG:-$PWD/mcp.toml}" \

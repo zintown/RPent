@@ -2,9 +2,16 @@
 
 每台机器人上运行一个 RPent 任务服务。中心 DSH 按机器人地址接入其 Streamable HTTP `/mcp`。RPent 通过本地 MCP 配置发现和调用规划、定位和控制服务。
 
-## 配置和启动
+## 安装依赖
 
-在 RPent 仓库根目录运行 `../.venv/bin/python -m pip install -r requirements.txt`，将服务和基础依赖安装到共享虚拟环境。依赖版本由 `pyproject.toml` 管理。 [RPent 依赖](../../../requirements.txt)
+在 RPent 仓库根目录使用 Python 3.12 安装 RPent 和基础依赖。 [依赖清单](../../../requirements.txt)
+
+```bash
+python3.12 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+```
+
+## 配置和启动
 
 `mcp.toml` 同时声明机器人的身份、能力和 RPent 可用的本地服务。以下示例假设机械臂的 MCP 服务已经在本机 8792 端口运行。
 
@@ -31,13 +38,13 @@ checks = { "arm.get_status" = { ready = true } }
 
 在 RPent 仓库根目录启动。与 DSH 同机仿真时，使用随仓库提供的 `mcp.toml` 并监听 `127.0.0.1`。远程连接使用 RPent 所在机器的可达地址，同一套仿真配置也可用于验证远程连接。部署到真机时，配置文件需要对应的真机适配器和下游 MCP 服务。
 
-以下是私网远程启动示例。将 IP、主机名、证书和虚拟环境路径换成部署环境的值。
+以下是私网远程启动示例。将 IP、主机名和证书路径换成部署环境的值。
 
 ```bash
 set -a
 source .env.local
 set +a
-export RPENT_VENV_DIR="$(cd .. && pwd)/.venv"
+export RPENT_VENV_DIR="$PWD/.venv"
 
 "$RPENT_VENV_DIR/bin/python" -m rpent.mcp.task.server \
   --mcp-config "$PWD/mcp.arm.local.toml" \

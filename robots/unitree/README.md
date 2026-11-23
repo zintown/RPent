@@ -10,12 +10,11 @@ RPent 通过 MCP 调用 A* 的地图规划和 MuJoCo 的运动控制。终端可
 
 ## 运行准备
 
-本地示例使用并列的 `a`、`mujoco_sim` 和 `rpent` 目录，Python 环境位于它们的父目录 `.venv`。按导航指南启动对应服务，并参照 [环境变量示例](../../.env.example) 在 RPent 根目录配置私有 `.env.local`。
+先安装 RPent，并在仓库根目录配置私有 `.env.local`。A* 和 MuJoCo 在各自仓库安装和启动。 [RPent 安装](../../rpent/mcp/task/README.zh-CN.md#安装依赖) · [环境变量示例](../../.env.example)
 
 在 RPent 根目录运行一条只读任务，检查当前位姿。
 
 ```bash
-export RPENT_VENV_DIR="$(cd .. && pwd)/.venv"
 bash run_rpent.sh '查询 Go2 当前地图位姿'
 ```
 
