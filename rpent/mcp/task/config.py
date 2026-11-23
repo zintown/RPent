@@ -9,18 +9,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from rpent.robots.base import get_robot_spec
 from rpent.robots.robot_spec import TaskExecutionSpec
-from rpent.tools.mcp_client import McpServerConfig, parse_mcp_servers
-
-try:
-    import tomllib
-except ModuleNotFoundError:
-    import tomli as tomllib
+from rpent.tools.mcp_client import McpServerConfig, parse_mcp_servers, read_mcp_config
 
 RobotName = Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")]
 Environment = Literal["simulation", "real"]
@@ -75,8 +70,25 @@ def load_deployment(
 ) -> TaskDeployment:
     """Load one deployment and resolve its natural-language execution adapter."""
     path = path.expanduser().resolve()
-    with path.open("rb") as handle:
-        config = tomllib.load(handle)
+    return _parse_deployment(read_mcp_config(path), path, robot_id, environment)
+
+
+def load_run_mcp_servers(path: Path) -> dict[str, McpServerConfig]:
+    """Apply a physical deployment's tool policy to CLI runs using its TOML."""
+    path = path.expanduser().resolve()
+    config = read_mcp_config(path)
+    identity = config.get("robot")
+    if isinstance(identity, dict) and identity.get("environment") == "real":
+        return _parse_deployment(config, path).servers
+    return parse_mcp_servers(config, path)
+
+
+def _parse_deployment(
+    config: dict[str, Any],
+    path: Path,
+    robot_id: str | None = None,
+    environment: Environment | None = None,
+) -> TaskDeployment:
     identity = config.get("robot")
     if not isinstance(identity, dict):
         raise ValueError(f"{path} must contain a [robot] table")
@@ -92,4 +104,7 @@ def load_deployment(
 
     servers = parse_mcp_servers(config, path)
     capabilities = _CapabilityTable(entries=config.get("capabilities", {})).entries
-    return TaskDeployment(robot, servers, capabilities, execution)
+    deployment = TaskDeployment(robot, servers, capabilities, execution)
+    if execution.configure_deployment is not None:
+        return execution.configure_deployment(deployment)
+    return deployment

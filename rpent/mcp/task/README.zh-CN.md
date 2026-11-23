@@ -79,3 +79,5 @@ export RPENT_VENV_DIR="$PWD/.venv"
 ## 添加本体服务
 
 先启动服务的 MCP 接口，在该机器人的 `[mcp_servers]` 下注册它，然后在 `[capabilities]` 下声明能力及只读检查。按需把动作工具加入白名单。具备 MCP 工具的机器人可沿用 `mcp` 适配器。需要专用提示词或停车与验收证据时，在 `robots/<适配器>` 注册 `RobotSpec`，通过 `task_execution.read_evidence` 返回对应的结构化证据与结束条件。
+
+`rpent mcp --mcp-config DEPLOYMENT.toml test SERVER --check TOOL` 可以在同一次连接中发现工具并查询状态。可重复传入 `--check`。检查只调用标为只读、可无参执行的工具，并打印 JSON 结果。某项结果包含 `ok = false` 或 `ready = false` 时命令返回退出码 1。[Go2 真机示例](../../../robots/unitree/TASK_MCP.zh-CN.md#接入-go2-真机-mcp)

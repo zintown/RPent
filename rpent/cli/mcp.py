@@ -18,22 +18,26 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import json
 import os
 import stat
 from collections.abc import MutableMapping
-from contextlib import ExitStack
+from contextlib import closing
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
 import tomlkit
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError
 from tomlkit.exceptions import TOMLKitError
 from tomlkit.toml_document import TOMLDocument
 
 from rpent.tools.mcp_client import (
+    McpClient,
     McpServerConfig,
     McpServiceError,
-    discover_mcp_tools,
     load_mcp_servers,
+    mcp_tool_name,
     parse_mcp_servers,
     validate_mcp_server_name,
 )
@@ -72,9 +76,17 @@ def _parser() -> argparse.ArgumentParser:
     add.add_argument("--startup-timeout-sec", type=float)
     add.add_argument("--tool-timeout-sec", type=float)
     actions.add_parser("list", help="List configured servers.")
-    actions.add_parser(
+    test = actions.add_parser(
         "test", help="Connect to an enabled server and discover its tools."
-    ).add_argument("name")
+    )
+    test.add_argument("name")
+    test.add_argument(
+        "--check",
+        action="append",
+        default=[],
+        metavar="TOOL",
+        help="Call a read-only tool that takes no arguments. Repeat to check more tools.",
+    )
     actions.add_parser("remove", help="Remove a server configuration.").add_argument(
         "name"
     )
@@ -160,17 +172,25 @@ def _edit_config(path: Path, name: str, server: McpServerConfig | None) -> None:
         os.close(directory)
 
 
-def _test_server(name: str, path: Path) -> None:
+def _test_server(name: str, path: Path, checks: list[str]) -> int:
     server = load_mcp_servers(path).get(name)
     if server is None:
         raise ValueError(f"unknown MCP server {name!r} in {path}")
     if not server.enabled or server.enabled_tools == []:
         raise ValueError(f"MCP server {name!r} has no enabled tools")
-    with ExitStack() as connections:
-        tools = discover_mcp_tools({name: server}, connections, lambda: None)
-    print(f"Connected to {name} ({server.transport})")
-    for tool in tools:
-        print(tool.name)
+    failed = False
+    with closing(McpClient(name, server)) as client:
+        tools = client.select_tools(server)
+        for definition in tools.values():
+            Draft202012Validator.check_schema(definition.inputSchema)
+        print(f"Connected to {name} ({server.transport})")
+        for tool in tools:
+            print(mcp_tool_name(name, tool))
+        for tool in checks:
+            result = client.read_check(tool)
+            print(f"{name}.{tool}\t{json.dumps(result, ensure_ascii=False)}")
+            failed = failed or result.get("ok") is False or result.get("ready") is False
+    return int(failed)
 
 
 def main(argv: list[str]) -> int:
@@ -194,7 +214,7 @@ def main(argv: list[str]) -> int:
         else:
             name = validate_mcp_server_name(args.name)
             if args.action == "test":
-                _test_server(name, path)
+                return _test_server(name, path, args.check)
             else:
                 server = (
                     _server_from_args(args, command) if args.action == "add" else None
@@ -202,6 +222,6 @@ def main(argv: list[str]) -> int:
                 _edit_config(path, name, server)
                 verb = "Added" if server is not None else "Removed"
                 print(f"{verb} MCP server {name!r} in {path}")
-    except (McpServiceError, OSError, TOMLKitError, ValueError) as exc:
+    except (McpServiceError, OSError, SchemaError, TOMLKitError, ValueError) as exc:
         parser.error(str(exc))
     return 0

@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import os
 import re
 from collections import ChainMap
@@ -48,6 +49,17 @@ except ModuleNotFoundError:
     import tomli as tomllib
 
 
+class McpMotionConfig(BaseModel):
+    """Readiness tool and evidence fields for a reported movement."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    tool: str = Field(min_length=1)
+    readiness_tool: str = Field(min_length=1)
+    stop_field: str = Field(min_length=1)
+    completion_field: str = Field(min_length=1)
+
+
 class McpServerConfig(BaseModel):
     """Connection and tool visibility settings for one MCP server."""
 
@@ -65,6 +77,7 @@ class McpServerConfig(BaseModel):
     tool_timeout_sec: float = Field(default=10, gt=0, allow_inf_nan=False)
     bearer_token_env_var: str | None = None
     run_report_tool: str | None = Field(default=None, min_length=1)
+    motion: McpMotionConfig | None = None
 
     @field_validator("url")
     @classmethod
@@ -122,12 +135,16 @@ def validate_mcp_server_name(name: str) -> str:
     return name
 
 
+def read_mcp_config(path: Path) -> dict[str, Any]:
+    """Read the TOML shared by task deployments and MCP tool discovery."""
+    with path.open("rb") as handle:
+        return tomllib.load(handle)
+
+
 def load_mcp_servers(path: Path) -> dict[str, McpServerConfig]:
     """Read server entries from a TOML configuration file."""
     path = path.expanduser().resolve()
-    with path.open("rb") as handle:
-        config = tomllib.load(handle)
-    return parse_mcp_servers(config, path)
+    return parse_mcp_servers(read_mcp_config(path), path)
 
 
 def parse_mcp_servers(config: dict[str, Any], path: Path) -> dict[str, McpServerConfig]:
@@ -257,9 +274,11 @@ class McpClient:
                 f"MCP server {name!r} startup failed: {_error_message(exc)}"
             ) from exc
 
-    async def _call(self, name: str, arguments: dict[str, Any]) -> types.CallToolResult:
+    async def _call(
+        self, name: str, arguments: dict[str, Any], timeout_s: float
+    ) -> types.CallToolResult:
         try:
-            with fail_after(self._timeout):
+            with fail_after(timeout_s):
                 if self._run_id is not None:
                     return await self._session.call_tool(
                         name, arguments, meta={"rpent.dev/run-id": self._run_id}
@@ -276,11 +295,13 @@ class McpClient:
         arguments: dict[str, Any],
         *,
         check_cancelled: Callable[[], None] | None = None,
+        timeout_s: float | None = None,
     ) -> types.CallToolResult:
         """Call a discovered tool once within the configured deadline."""
         if name not in self.tools:
             raise McpServiceError(f"MCP server {self.name!r} does not export {name!r}")
-        call = self._portal.start_task_soon(self._call, name, arguments)
+        timeout = self._timeout if timeout_s is None else min(timeout_s, self._timeout)
+        call = self._portal.start_task_soon(self._call, name, arguments, timeout)
         try:
             while check_cancelled is not None and not call.done():
                 check_cancelled()
@@ -294,20 +315,79 @@ class McpClient:
         """Release the MCP session and its worker."""
         self._connections.close()
 
+    def select_tools(self, config: McpServerConfig) -> dict[str, types.Tool]:
+        """Resolve the planner's allowlist and reserve the reporting tool."""
+        if config.run_report_tool is not None:
+            self.require_readonly_tool(config.run_report_tool)
+        names = self.tools if config.enabled_tools is None else config.enabled_tools
+        selected = {}
+        for name in names:
+            if name == config.run_report_tool:
+                continue
+            if name not in self.tools:
+                raise McpServiceError(
+                    f"MCP server {self.name!r} does not export {name!r}"
+                )
+            selected[name] = self.tools[name]
+        return selected
+
     def require_readonly_tool(self, name: str) -> None:
-        """Validate a configured reporting tool before using it."""
+        """Validate an exported read-only tool that can be called without arguments."""
         definition = self.tools.get(name)
         if not (
             definition
             and definition.annotations
-            and definition.annotations.readOnlyHint
+            and definition.annotations.readOnlyHint is True
+            and Draft202012Validator(definition.inputSchema).is_valid({})
         ):
             raise McpServiceError(
-                f"{self.name}.{name} must be an exported read-only tool"
+                f"{self.name}.{name} must be an exported read-only tool callable without arguments"
             )
 
+    def read_check(
+        self, name: str, *, check_cancelled: Callable[[], None] | None = None
+    ) -> dict[str, Any]:
+        """Call a read-only check with a short deadline and decode its object result."""
+        self.require_readonly_tool(name)
+        result = self.call_tool(name, {}, check_cancelled=check_cancelled, timeout_s=8)
+        message = next(
+            (
+                block.text
+                for block in result.content
+                if isinstance(block, types.TextContent)
+            ),
+            "",
+        )
+        if result.isError:
+            raise McpServiceError(message or f"{self.name}.{name} returned an error")
+        if result.structuredContent is not None:
+            return result.structuredContent
+        if len(result.content) == 1 and message:
+            try:
+                data = json.loads(message)
+            except ValueError as exc:
+                raise McpServiceError(
+                    f"{self.name}.{name} returned invalid JSON"
+                ) from exc
+            if isinstance(data, dict):
+                return data
+        raise McpServiceError(f"{self.name}.{name} must return a JSON object")
 
-def _tool_name(server: str, remote_name: str) -> str:
+
+def check_matches(
+    data: dict[str, Any], key: str, expected: bool | int | float | str
+) -> bool:
+    """Match a check field using its dotted path, scalar value and type."""
+    value: Any = data
+    for part in key.split("."):
+        if not isinstance(value, dict) or part not in value:
+            return False
+        value = value[part]
+    return type(value) is type(expected) and value == expected
+
+
+def mcp_tool_name(server: str, remote_name: str) -> str:
+    """Return the planner and transcript name for a tool on a configured server."""
     name = f"mcp__{server}__{remote_name}"
     normalized = re.sub(r"[^A-Za-z0-9_-]", "_", name)
     if len(name) > 64 or normalized != name:
@@ -320,17 +400,35 @@ def _invoke(
     name: str,
     check_cancelled: Callable[[], None],
     action_marker: Path | None,
+    motion: McpMotionConfig | None,
     /,
     **arguments: Any,
 ) -> ToolResult:
+    attempted = False
     try:
         check_cancelled()
+        if motion is not None:
+            if action_marker is None:
+                raise McpServiceError(
+                    f"{client.name}.{name} requires a tracked task and a run_report_tool"
+                )
+            readiness = client.read_check(
+                motion.readiness_tool, check_cancelled=check_cancelled
+            )
+            if readiness.get("ready") is not True or readiness.get("ok") is False:
+                reason = readiness.get("reason") or "the controller is not ready"
+                raise McpServiceError(f"{client.name}.{name} refused because {reason}")
+            check_cancelled()
         if action_marker is not None:
             action_marker.parent.mkdir(exist_ok=True)
             action_marker.touch()
+        attempted = True
         result = client.call_tool(name, arguments, check_cancelled=check_cancelled)
     except McpServiceError as exc:
-        return ToolResult(data={"error": str(exc)})
+        error_data: dict[str, Any] = {"error": str(exc)}
+        if motion is not None and not attempted:
+            error_data["motion_rejected"] = True
+        return ToolResult(data=error_data)
     data: dict[str, Any] = {}
     images = []
     content = []
@@ -372,32 +470,32 @@ def discover_mcp_tools(
             name, config, run_id=run_id if config.run_report_tool else None
         )
         connections.callback(client.close)
-        if config.run_report_tool is not None:
-            client.require_readonly_tool(config.run_report_tool)
-        selected = (
-            client.tools if config.enabled_tools is None else config.enabled_tools
-        )
-        for raw_name in selected:
-            if raw_name == config.run_report_tool:
-                continue
-            definition = client.tools.get(raw_name)
-            if definition is None:
-                raise ValueError(f"MCP server {name!r} does not export {raw_name!r}")
+        for raw_name, definition in client.select_tools(config).items():
             Draft202012Validator.check_schema(definition.inputSchema)
             readonly = (
                 definition.annotations and definition.annotations.readOnlyHint is True
             )
+            motion = (
+                config.motion
+                if config.motion and raw_name == config.motion.tool
+                else None
+            )
             marker = (
-                Path(output) / ".mcp-actions" / name
-                if run_id and output and config.run_report_tool and not readonly
+                Path(output) / ".mcp-actions" / (f"{name}.motion" if motion else name)
+                if run_id
+                and output
+                and config.run_report_tool
+                and (motion or not readonly)
                 else None
             )
             declarations.append(
                 Tool(
-                    name=_tool_name(name, raw_name),
+                    name=mcp_tool_name(name, raw_name),
                     description=definition.description or raw_name,
                     args_schema=None,
-                    handler=partial(_invoke, client, raw_name, check_cancelled, marker),
+                    handler=partial(
+                        _invoke, client, raw_name, check_cancelled, marker, motion
+                    ),
                     _input_schema=definition.inputSchema,
                     capture_state=False,
                 )

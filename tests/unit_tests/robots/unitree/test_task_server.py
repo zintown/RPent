@@ -89,7 +89,8 @@ class TaskServerTest(unittest.TestCase):
         config.write_text(
             '[robot]\nid = "go2-test"\ntype = "unitree.go2"\n'
             'environment = "simulation"\nadapter = "unitree"\n'
-            "[mcp_servers]\n"
+            '[mcp_servers.mujoco]\nurl = "http://127.0.0.1:1/mcp"\n'
+            'enabled_tools = ["get_pose", "follow_plan"]\n'
         )
         self.deployment = load_deployment(config)
         self.mode = patch.dict(os.environ, {"RPENT_TEST_MODE": "success"})

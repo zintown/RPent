@@ -15,7 +15,12 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from rpent.robots.robot_spec import TaskEvidence
-from rpent.tools.mcp_client import McpClient, McpServerConfig, McpServiceError
+from rpent.tools.mcp_client import (
+    McpClient,
+    McpServerConfig,
+    McpServiceError,
+    check_matches,
+)
 
 
 class _RunReport(BaseModel):
@@ -69,10 +74,17 @@ def collect_run_evidence(
         (output / ".mcp-actions").glob("*"),
         key=lambda marker: marker.stat().st_mtime_ns,
     )
+    attempts: dict[str, bool] = {}
     for marker in markers:
-        name = marker.name
+        name = marker.name.removesuffix(".motion")
+        attempts[name] = attempts.pop(name, False) or name != marker.name
+    for name, is_motion in attempts.items():
         try:
-            report = _read_report(name, servers[name], run_id, timeout_s)
+            config = servers[name]
+            motion = config.motion if is_motion else None
+            if is_motion and motion is None:
+                raise ValueError("motion evidence is not configured")
+            report = _read_report(name, config, run_id, timeout_s)
         except (McpServiceError, KeyError, ValueError):
             attention = True
             stop_error = (
@@ -82,11 +94,25 @@ def collect_run_evidence(
         for key, fields in report.evidence.items():
             previous = data.get(key)
             data[key] = {**previous, **fields} if isinstance(previous, dict) else fields
-        if report.state != "finished" or report.requires_attention:
+        if (
+            report.state != "finished"
+            or report.requires_attention
+            or (
+                motion is not None
+                and (
+                    report.stop_error
+                    or not check_matches(report.evidence, motion.stop_field, True)
+                )
+            )
+        ):
             attention = True
             stop_error = (
                 stop_error or report.stop_error or f"{name} stop could not be verified"
             )
+        elif motion is not None and not check_matches(
+            report.evidence, motion.completion_field, True
+        ):
+            verification = True
         verification = verification or report.verification_required
         error = error or report.error
     return TaskEvidence(data, attention, verification, error, stop_error)

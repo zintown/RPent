@@ -14,24 +14,41 @@ from typing import Any
 from rpent.robots.robot_spec import TaskEvidence
 
 
-def read_evidence(_output: Path, transcript: dict[str, Any]) -> TaskEvidence:
+def read_evidence(
+    _output: Path,
+    transcript: dict[str, Any],
+    *,
+    pose_tools: frozenset[str],
+    follow_tools: frozenset[str],
+    use_run_report: bool,
+) -> TaskEvidence:
     """Read compact evidence from tool results recorded by the task process."""
     navigation: dict[str, Any] = {}
+    error = None
+    tools = pose_tools | follow_tools
     for message in transcript.get("messages", []):
         name = message.get("name")
-        if message.get("role") != "tool" or name not in {
-            "mcp__mujoco__get_pose",
-            "mcp__mujoco__follow_plan",
-        }:
+        if message.get("role") != "tool" or name not in tools:
             continue
         try:
-            data = json.loads(message["content"])
+            data = json.loads(message.get("content", ""))
         except (TypeError, ValueError):
             continue
-        result = data.get("structured_content") if isinstance(data, dict) else None
+        if not isinstance(data, dict):
+            continue
+        if use_run_report and name in follow_tools:
+            if data.get("motion_rejected") is True:
+                detail = data.get("error")
+                error = (
+                    detail
+                    if isinstance(detail, str)
+                    else "Go2 rejected navigation before execution"
+                )
+            continue
+        result = data.get("structured_content")
         if not isinstance(result, dict) or result.get("ok") is not True:
             continue
-        if name == "mcp__mujoco__get_pose":
+        if name in pose_tools:
             navigation["pose"] = result
         elif result.get("navigation_completed") is True:
             navigation.update(
@@ -42,4 +59,6 @@ def read_evidence(_output: Path, transcript: dict[str, Any]) -> TaskEvidence:
                 )
                 + 1,
             )
-    return TaskEvidence(data={"navigation": navigation} if navigation else {})
+    return TaskEvidence(
+        data={"navigation": navigation} if navigation else {}, error=error
+    )

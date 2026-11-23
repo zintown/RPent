@@ -263,17 +263,13 @@ class TaskRunner:
                 elif record["stop_requested"]:
                     status = "stopped"
                 elif (
-                    exit_code == 0
-                    and not record["error"]
-                    and evidence.verification_required
-                ):
-                    status = "verification_required"
-                elif (
                     exit_code != 0
                     or record["error"]
                     or finish.get("status") in {"failure", "stuck"}
                 ):
                     status = "failed"
+                elif evidence.verification_required:
+                    status = "verification_required"
                 elif finish.get("status") == "success":
                     status = "succeeded"
                 elif re.search(

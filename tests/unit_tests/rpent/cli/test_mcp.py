@@ -102,6 +102,47 @@ def test_mcp_rejects_mixed_transport_options_without_writing(tmp_path):
     assert not path.exists()
 
 
+def test_mcp_checks_show_status_and_never_call_actions(tmp_path, capsys):
+    (tmp_path / "probe.py").write_text(
+        """
+from pathlib import Path
+from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
+
+server = FastMCP("probe")
+
+@server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+def get_pose() -> dict:
+    return {"ok": True, "age_s": 0.1, "map_version": "1"}
+
+@server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+def get_navigation_status() -> dict:
+    return {"ready": False, "reason": "map_mismatch"}
+
+@server.tool()
+def follow_plan() -> str:
+    Path("followed").touch()
+    return "followed"
+
+server.run(transport="stdio")
+"""
+    )
+    path = tmp_path / "mcp.toml"
+    options = ["--mcp-config", str(path)]
+    assert (
+        main([*options, "add", "go2", "--cwd", ".", "--", sys.executable, "probe.py"])
+        == 0
+    )
+    assert main([*options, "test", "go2", "--check", "get_pose"]) == 0
+    assert '"map_version": "1"' in capsys.readouterr().out
+    assert main([*options, "test", "go2", "--check", "get_navigation_status"]) == 1
+    assert "map_mismatch" in capsys.readouterr().out
+    with pytest.raises(SystemExit) as error:
+        main([*options, "test", "go2", "--check", "follow_plan"])
+    assert error.value.code == 2
+    assert not (tmp_path / "followed").exists()
+
+
 def test_concurrent_additions_preserve_each_server(tmp_path):
     path = tmp_path / "mcp.toml"
 

@@ -38,6 +38,7 @@ from rpent.evaluation import RunFinalizer
 from rpent.robots.prompt_bundle import PromptBundle
 
 if TYPE_CHECKING:
+    from rpent.mcp.task.config import TaskDeployment
     from rpent.utils.daemon import ProcessDaemon
 
 
@@ -68,6 +69,7 @@ class TaskExecutionSpec:
     """Opt into natural-language dispatch and supply evidence after execution."""
 
     read_evidence: Callable[[Path, dict[str, Any]], TaskEvidence] | None = None
+    configure_deployment: Callable[[TaskDeployment], TaskDeployment] | None = None
 
 
 @dataclass(frozen=True)
