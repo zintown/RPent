@@ -9,6 +9,12 @@ description = "读取 Go2 机身在已配置地图中的实时位姿。"
 tools = ["go2.get_pose"]
 checks = { "go2.get_pose" = { ok = true, frame_id = "map" } }
 
+[capabilities.navigation]
+description = "根据规划轨迹控制底盘行走并制动停稳。"
+tools = ["go2.follow_plan", "go2.stop"]
+checks = { "go2.get_navigation_status" = { ready = true } }
+
 [mcp_servers.go2]
 url = "http://127.0.0.1:8792/mcp"
-enabled_tools = ["get_pose", "get_navigation_status"]
+enabled_tools = ["get_pose", "get_navigation_status", "follow_plan", "stop", "get_run_report"]
+run_report_tool = "get_run_report"
