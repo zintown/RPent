@@ -26,7 +26,6 @@ import threading
 import time
 import traceback
 from collections.abc import Iterable
-from contextlib import ExitStack
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
@@ -44,6 +43,7 @@ if TYPE_CHECKING:
     from rpent.memory.manager import MemoryManager
     from rpent.session import EnvState, StepRecord
     from rpent.tools.mcp_client import McpServerConfig
+    from rpent.tools.mcp_registry import McpServiceRegistry
 
 
 @dataclass(eq=False)
@@ -156,7 +156,7 @@ class Toolkit:
         self._memory = memory
         self.require_finish = require_finish
         self._scheduler = _Scheduler()
-        self._mcp_connections = ExitStack()
+        self._mcp_registry: McpServiceRegistry | None = None
         self._register_common_tools()
 
     # ------------------------------------------------------------------
@@ -183,16 +183,23 @@ class Toolkit:
             self.add_tool(tool)
 
     def add_mcp_tools(self, servers: dict[str, McpServerConfig]) -> None:
-        """Connect configured servers and bind their tools to this toolkit."""
-        from rpent.tools.mcp_client import discover_mcp_tools
+        """Configure downstream services and publish their available model tools."""
+        registry = self.mcp_registry
+        registry.register(servers)
+        tools = registry.model_tools(servers, self.raise_if_cancelled)
+        names = [tool.name for tool in tools]
+        if len(set(names)) != len(names) or self._tools.keys() & set(names):
+            raise ValueError("MCP tool names collide in the toolkit")
+        self.add_tools(tools)
 
-        with ExitStack() as connections:
-            tools = discover_mcp_tools(servers, connections, self.raise_if_cancelled)
-            names = [tool.name for tool in tools]
-            if len(set(names)) != len(names) or self._tools.keys() & set(names):
-                raise ValueError("MCP tool names collide in the toolkit")
-            self.add_tools(tools)
-            self._mcp_connections.enter_context(connections.pop_all())
+    @property
+    def mcp_registry(self) -> McpServiceRegistry:
+        """Return the service registry shared by this toolkit and its workflows."""
+        if self._mcp_registry is None:
+            from rpent.tools.mcp_registry import McpServiceRegistry
+
+            self._mcp_registry = McpServiceRegistry()
+        return self._mcp_registry
 
     def _register_common_tools(self) -> None:
         from rpent.tools.common import CommonTools
@@ -385,7 +392,8 @@ class Toolkit:
         try:
             self.cancel_active_and_wait()
         finally:
-            self._mcp_connections.close()
+            if self._mcp_registry is not None:
+                self._mcp_registry.close()
 
     def exploration_continuation(self, *, explicit: bool = False) -> str | None:
         """Return a rule-checked continuation at an idle planner boundary."""

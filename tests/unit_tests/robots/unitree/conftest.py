@@ -16,15 +16,10 @@
 
 from __future__ import annotations
 
-import socket
-import threading
-import time
-from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
-import uvicorn
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
@@ -35,38 +30,8 @@ def tool_output_dir(tmp_path, monkeypatch):
     monkeypatch.setattr("rpent.utils.logging._output_dir", tmp_path / "run")
 
 
-@contextmanager
-def run_mcp(mcp):
-    with socket.socket() as listener:
-        listener.bind(("127.0.0.1", 0))
-        port = listener.getsockname()[1]
-        server = uvicorn.Server(
-            uvicorn.Config(mcp.streamable_http_app(), log_level="warning")
-        )
-        worker = threading.Thread(
-            target=server.run, kwargs={"sockets": [listener]}, daemon=True
-        )
-        worker.start()
-        try:
-            deadline = time.monotonic() + 5
-            while not server.started:
-                assert time.monotonic() < deadline and worker.is_alive()
-                time.sleep(0.01)
-            yield f"http://127.0.0.1:{port}/mcp"
-        finally:
-            server.should_exit = True
-            worker.join(5)
-            assert not worker.is_alive()
-
-
 @pytest.fixture
-def serve_mcp():
-    """Serve a FastMCP instance on a loopback port."""
-    return run_mcp
-
-
-@pytest.fixture
-def mcp_navigation():
+def mcp_navigation(serve_mcp):
     """Provide MCP-only backends to exercise RPent's ordinary CLI interface."""
     astar = FastMCP("test-astar", stateless_http=True, json_response=True)
     sim = FastMCP("test-mujoco", stateless_http=True, json_response=True)
@@ -108,5 +73,5 @@ def mcp_navigation():
     def get_walk_status() -> dict[str, Any]:
         return {"state": "finished"}
 
-    with run_mcp(astar) as astar_url, run_mcp(sim) as sim_url:
+    with serve_mcp(astar) as astar_url, serve_mcp(sim) as sim_url:
         yield SimpleNamespace(astar_url=astar_url, sim_url=sim_url, state=state)

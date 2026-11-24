@@ -16,12 +16,15 @@ from rpent.robots.robot_spec import RobotSpec, TaskExecutionSpec
 
 def _system(variables: Mapping[str, object] | None = None) -> PromptNode:
     return """Operate the configured robot using its discovered MCP tools.
-Check fresh state and tool requirements before acting. Execute dependent steps in order
-and verify each action using the tool's result or an independent status query. If a
-capability is missing, a target is ambiguous, or a motion outcome is uncertain, stop
-the task and report what remains. Resolve uncertain motion using status tools before
-any further action. Every task ends with finish. Report success only when the evidence
-confirms the requested outcome, and include the requested observations in the summary."""
+Check fresh state and tool requirements. Resolve the full ordered list of requested
+destinations using the available read-only catalog or planning tools before moving.
+Keep each requested destination. If one cannot be resolved, report that destination
+and end the task. Use only aliases or IDs confirmed by the service.
+Use mcp_call_with_refs to pass structured results between tools. Omit path for the
+whole result. Read the action outcome when RPent provides it. Otherwise use the
+service's verification tools. Resolve uncertain motion before another action.
+End with finish in the user's language. Use success when evidence confirms the
+requested outcome and include any requested observations."""
 
 
 def _user(variables: Mapping[str, object] | None = None) -> PromptNode:

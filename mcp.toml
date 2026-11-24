@@ -2,24 +2,47 @@
 id = "go2-01"
 type = "unitree.go2"
 environment = "simulation"
-adapter = "remote_navigation"
+adapter = "mcp"
 
 [capabilities.map_navigation]
 description = "在已配置地图上规划路线，跟踪路径前往站位或坐标，并确认到达。"
-bindings = { localization = "sim", planner = "astar", executor = "sim" }
+tools = ["sim.get_pose", "astar.plan_route", "sim.walk_start", "sim.walk_status", "sim.walk_stop"]
 
-[service_adapters]
-astar = "robot_astar"
-sim = "robot_sim"
+[capabilities.map_navigation.checks."astar.service_health"]
+ok = true
+
+[capabilities.map_navigation.checks."sim.sim_status"]
+simulator_running = true
+"pose.fallen" = false
+map_id = { tool = "astar.service_health", field = "map_id" }
+map_version = { tool = "astar.service_health", field = "map_version" }
+
+[read_only_queries.list_navigation_targets]
+description = "查询当前远程地图的可导航地点和编号。返回固定站位与场景图，物体可达性见 reachable 和 stand_pose。"
+tools = ["astar.list_waypoints", "astar.list_scene_graph"]
 
 [mcp_servers.astar]
 transport = "streamable-http"
 url = "http://192.168.104.191:8769/mcp"
-enabled_tools = ["service_health", "plan_route"]
+enabled_tools = ["service_health", "plan_route", "list_waypoints", "list_scene_graph"]
+read_only_tools = ["service_health", "plan_route", "list_waypoints", "list_scene_graph"]
 tool_timeout_sec = 20
 
 [mcp_servers.sim]
 transport = "streamable-http"
 url = "http://192.168.104.191:8772/mcp"
 enabled_tools = ["sim_status", "get_pose", "walk_start", "walk_status", "walk_stop"]
+read_only_tools = ["sim_status", "get_pose", "walk_status"]
 tool_timeout_sec = 10
+
+[mcp_servers.sim.action_status]
+start_tool = "walk_start"
+status_tool = "walk_status"
+id_field = "walk_id"
+terminal = { state = "finished" }
+success = { "result.ok" = true, "result.legs.*.reached" = true, "pose.fallen" = false }
+rejected = { ok = false }
+wait_for_terminal = true
+completion_timeout_sec = 300
+poll_interval_sec = 5
+preflight = { "astar.plan_route" = { ok = true } }

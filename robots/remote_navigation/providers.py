@@ -6,7 +6,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Annotated, Any, ClassVar, Literal, TypeVar
 
-from jsonschema import Draft202012Validator
 from mcp.types import TextContent
 from pydantic import (
     BaseModel,
@@ -17,7 +16,8 @@ from pydantic import (
     ValidationError,
 )
 
-from rpent.tools.mcp_client import McpClient, McpServiceError
+from rpent.tools.mcp_client import McpServiceError
+from rpent.tools.mcp_registry import McpService, McpToolInputError
 
 Identifier = Annotated[str, Field(min_length=1)]
 NamedGoal = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
@@ -148,9 +148,9 @@ class McpProvider:
     role_tools: ClassVar[dict[str, tuple[str, ...]]]
 
     def __init__(
-        self, client: McpClient, check_cancelled: Callable[[], None] | None
+        self, service: McpService, check_cancelled: Callable[[], None] | None
     ) -> None:
-        self.client = client
+        self.service = service
         self.check_cancelled = check_cancelled
 
     def call(
@@ -161,21 +161,16 @@ class McpProvider:
         timeout_s: float | None = None,
         cleanup: bool = False,
     ) -> dict[str, Any]:
-        label = f"{self.client.name}.{name}"
-        validator = Draft202012Validator(self.client.tools[name].inputSchema)
-        problem = next(validator.iter_errors(args), None)
-        if problem is not None:
-            raise RequestRejected(
-                f"{label} input does not match its schema: {problem.message}"
+        label = f"{self.service.name}.{name}"
+        try:
+            result = self.service.call_tool(
+                name,
+                args,
+                timeout_s=timeout_s,
+                check_cancelled=None if cleanup else self.check_cancelled,
             )
-        if not cleanup and self.check_cancelled is not None:
-            self.check_cancelled()
-        result = self.client.call_tool(
-            name,
-            args,
-            timeout_s=timeout_s,
-            check_cancelled=None if cleanup else self.check_cancelled,
-        )
+        except McpToolInputError as exc:
+            raise RequestRejected(str(exc)) from exc
         if result.isError:
             message = next(
                 (
@@ -200,7 +195,7 @@ class McpProvider:
             return model.model_validate(data)
         except ValidationError as exc:
             raise McpServiceError(
-                f"{self.client.name} invalid response: {exc}"
+                f"{self.service.name} invalid response: {exc}"
             ) from exc
 
 
@@ -255,15 +250,15 @@ class RobotSim(McpProvider):
         data = self.call("sim_status", {})
         status = self.validate(_SimulationStatus, data)
         if not status.simulator_running:
-            raise McpServiceError(f"{self.client.name} simulator is stopped")
+            raise McpServiceError(f"{self.service.name} simulator is stopped")
         if status.pose is None:
-            raise McpServiceError(f"{self.client.name} simulator pose is unavailable")
+            raise McpServiceError(f"{self.service.name} simulator pose is unavailable")
         if status.pose.fallen:
-            raise McpServiceError(f"{self.client.name} robot has fallen")
+            raise McpServiceError(f"{self.service.name} robot has fallen")
         if status.other_controllers:
-            raise McpServiceError(f"{self.client.name} has another active controller")
+            raise McpServiceError(f"{self.service.name} has another active controller")
         if status.walk and status.walk.get("state") not in ("idle", "finished"):
-            raise McpServiceError(f"{self.client.name} has an unfinished walk")
+            raise McpServiceError(f"{self.service.name} has an unfinished walk")
         return self.validate(MapReference, data)
 
     def pose(self) -> Pose:
@@ -292,7 +287,7 @@ class RobotSim(McpProvider):
         )
         if status.walk_id != walk_id:
             raise McpServiceError(
-                f"{self.client.name} returned walk {status.walk_id!r}, expected {walk_id!r}"
+                f"{self.service.name} returned walk {status.walk_id!r}, expected {walk_id!r}"
             )
         return status
 

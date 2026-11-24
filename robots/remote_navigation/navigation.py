@@ -3,16 +3,12 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Iterator
-from contextlib import ExitStack, closing, contextmanager
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic, sleep, time_ns
 from typing import Any
 from uuid import uuid4
-
-from jsonschema import Draft202012Validator
-from jsonschema.exceptions import SchemaError
 
 from robots.remote_navigation.providers import (
     SERVICE_ADAPTERS,
@@ -25,7 +21,8 @@ from robots.remote_navigation.providers import (
 from rpent.evaluation import write_json_atomic
 from rpent.mcp.task.config import TaskDeployment
 from rpent.robots.robot_spec import TaskEvidence
-from rpent.tools.mcp_client import McpClient, McpServerConfig, McpServiceError
+from rpent.tools.mcp_client import McpServiceError
+from rpent.tools.mcp_registry import McpServiceRegistry
 from rpent.tools.toolkit import ToolCancelled
 
 ROLES = ("localization", "planner", "executor")
@@ -40,7 +37,6 @@ class NavigationServices:
     """Resolve the providers selected for one map navigation capability."""
 
     bindings: dict[str, str]
-    configs: dict[str, McpServerConfig]
     adapters: dict[str, type[McpProvider]]
 
     @classmethod
@@ -50,13 +46,6 @@ class NavigationServices:
             raise ValueError(
                 "map_navigation requires localization, planner and executor bindings"
             )
-        if any(
-            name != "map_navigation" and cap.bindings
-            for name, cap in deployment.capabilities.items()
-        ):
-            raise ValueError("remote_navigation supports bindings for map_navigation")
-
-        configs = {}
         adapters = {}
         for role, name in capability.bindings.items():
             config = deployment.servers.get(name)
@@ -79,84 +68,50 @@ class NavigationServices:
                     raise ValueError(
                         f"service {name!r} must enable tools {sorted(missing)}"
                     )
-            configs[name] = config
             adapters[name] = adapter
-        return cls(capability.bindings, configs, adapters)
+        return cls(capability.bindings, adapters)
 
-    @contextmanager
-    def connect(
+    def providers(
         self,
+        registry: McpServiceRegistry,
         *roles: str,
         check_cancelled: Callable[[], None] | None = None,
-        probe: bool = False,
-    ) -> Iterator[dict[str, McpProvider]]:
-        """Connect each selected service once and require its bound tools."""
-        with ExitStack() as stack:
-            providers: dict[str, McpProvider] = {}
-            for role in roles:
-                name = self.bindings[role]
-                if name not in providers:
-                    if check_cancelled is not None:
-                        check_cancelled()
-                    config = self.configs[name]
-                    if probe:
-                        config = config.model_copy(
-                            update={
-                                "startup_timeout_sec": min(
-                                    config.startup_timeout_sec, 5
-                                ),
-                                "tool_timeout_sec": min(config.tool_timeout_sec, 5),
-                            }
-                        )
-                    client = stack.enter_context(closing(McpClient(name, config)))
-                    selected = client.select_tools(config)
-                    adapter = self.adapters[name]
-                    required_tools = {
-                        tool
-                        for bound_role in roles
-                        if self.bindings[bound_role] == name
-                        for tool in adapter.role_tools[bound_role]
-                    }
-                    missing = required_tools - selected.keys()
-                    if missing:
-                        raise McpServiceError(
-                            f"{name} does not export tools {sorted(missing)}"
-                        )
-                    for tool in required_tools:
-                        try:
-                            Draft202012Validator.check_schema(
-                                selected[tool].inputSchema
-                            )
-                        except SchemaError as exc:
-                            raise McpServiceError(
-                                f"{name}.{tool} has an invalid input schema"
-                            ) from exc
-                    providers[name] = adapter(client, check_cancelled)
-            yield {role: providers[self.bindings[role]] for role in roles}
+    ) -> dict[str, McpProvider]:
+        """Bind workflow roles to services owned by the shared registry."""
+        providers: dict[str, McpProvider] = {}
+        for role in roles:
+            name = self.bindings[role]
+            if name not in providers:
+                if check_cancelled is not None:
+                    check_cancelled()
+                service = registry.connect(name)
+                providers[name] = self.adapters[name](service, check_cancelled)
+            provider = providers[name]
+            missing = set(provider.role_tools[role]) - provider.service.tools.keys()
+            if missing:
+                raise McpServiceError(f"{name} does not enable tools {sorted(missing)}")
+        return {role: providers[self.bindings[role]] for role in roles}
 
     def ready_map(
-        self, check_cancelled: Callable[[], None] | None = None
+        self,
+        registry: McpServiceRegistry,
+        check_cancelled: Callable[[], None] | None = None,
     ) -> MapReference:
         """Check live readiness without starting a simulation or an action."""
-        with self.connect(
-            *ROLES, probe=True, check_cancelled=check_cancelled
-        ) as providers:
-            return _ready_map(providers)
+        providers = self.providers(registry, *ROLES, check_cancelled=check_cancelled)
+        return _ready_map(providers)
 
-    def check_capability(self, _name: str) -> str | None:
-        try:
-            self.ready_map()
-        except McpServiceError as exc:
-            return str(exc)
-        return None
+    def check_readiness(self, registry: McpServiceRegistry) -> None:
+        """Raise a service error when the map workflow cannot run."""
+        self.ready_map(registry)
 
 
 def _ready_map(providers: dict[str, McpProvider]) -> MapReference:
     maps = {
-        provider.client.name: provider.ready_map()
+        provider.service.name: provider.ready_map()
         for provider in dict.fromkeys(providers.values())
     }
-    reference = maps[providers["planner"].client.name]
+    reference = maps[providers["planner"].service.name]
     if any(current != reference for current in maps.values()):
         versions = ", ".join(
             f"{name}={current.map_id}/{current.map_version}"
@@ -224,10 +179,12 @@ class Navigation:
     def __init__(
         self,
         services: NavigationServices,
+        registry: McpServiceRegistry,
         output: Path,
         check_cancelled: Callable[[], None],
     ) -> None:
         self.services = services
+        self.registry = registry
         self.output = output
         self.check_cancelled = check_cancelled
 
@@ -239,10 +196,10 @@ class Navigation:
         path = self.output / f"navigation-{time_ns()}-{uuid4().hex}.json"
         record = {"state": "planning", "goal_count": len(goals)}
         try:
-            with self.services.connect(
-                *ROLES, check_cancelled=self.check_cancelled
-            ) as providers:
-                self._execute(providers, goals, path, record)
+            providers = self.services.providers(
+                self.registry, *ROLES, check_cancelled=self.check_cancelled
+            )
+            self._execute(providers, goals, path, record)
         except McpServiceError as exc:
             if record["state"] == "planning":
                 _store(path, record, state="failed", error=str(exc))

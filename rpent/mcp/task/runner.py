@@ -35,8 +35,8 @@ from uuid import uuid4
 import tomlkit
 
 from rpent.evaluation import write_json_atomic
-from rpent.mcp.task.config import TaskDeployment
-from rpent.mcp.task.reports import collect_run_evidence
+from rpent.mcp.task.config import TaskDeployment, load_deployment
+from rpent.mcp.task.reports import collect_run_evidence, has_known_mcp_actions
 from rpent.robots.robot_spec import TaskEvidence
 from rpent.utils.logging import get_logger
 
@@ -101,6 +101,10 @@ class TaskRunner:
                     name: config.model_dump(exclude_defaults=True)
                     for name, config in deployment.capabilities.items()
                 },
+                "read_only_queries": {
+                    name: config.model_dump()
+                    for name, config in deployment.read_only_queries.items()
+                },
             }
         )
         self.jobs_dir.mkdir(parents=True, exist_ok=True)
@@ -122,6 +126,7 @@ class TaskRunner:
                     write_json_atomic(path, record)
                 if record["status"] in ATTENTION_STATUSES:
                     self._requires_attention = True
+            self.reconcile_actions()
         except BaseException:
             self._lease.close()
             raise
@@ -138,6 +143,7 @@ class TaskRunner:
                 raise TaskConflict("service is shutting down")
             if self._active is not None:
                 raise TaskConflict("a task is already running or stopping")
+            self.reconcile_actions()
             if self._requires_attention:
                 raise TaskConflict(
                     "verify the previous task and equipment before starting another task"
@@ -223,6 +229,7 @@ class TaskRunner:
         assert job.process is not None
         exit_code = job.process.wait()
         record = job.record
+        recheck = False
         try:
             output = Path(record["output_dir"])
             transcripts = sorted(output.glob("transcript_*.json"))
@@ -235,8 +242,15 @@ class TaskRunner:
                 self.deployment.servers,
                 output,
                 record["run_id"],
-                timeout_s=min(self._stop_timeout_s, 18),
+                timeout_s=0
+                if record["stop_requested"]
+                else min(self._stop_timeout_s, 18),
                 initial=initial,
+            )
+            recheck = (
+                read_evidence is None
+                and evidence.requires_attention
+                and has_known_mcp_actions(self.deployment.servers, output)
             )
         except Exception:
             logger.exception("Cannot collect result for task in %s", job.directory)
@@ -266,26 +280,11 @@ class TaskRunner:
                     )
                 ):
                     status = "requires_attention"
-                elif record["stop_requested"]:
-                    status = "stopped"
-                elif (
-                    exit_code != 0
-                    or record["error"]
-                    or finish.get("status") in {"failure", "stuck"}
-                ):
-                    status = "failed"
-                elif evidence.verification_required:
-                    status = "verification_required"
-                elif finish.get("status") == "success":
-                    status = "succeeded"
-                elif re.search(
-                    r"Request budget of \d+ reached\.",
-                    self._log_tail(job, 65536),
-                ):
-                    status = "budget_exhausted"
                 else:
-                    status = "incomplete"
+                    status = self._settled_status(job, exit_code, evidence)
                 record.update(status=status, exit_code=exit_code, finished_at=_now())
+                if status == "requires_attention" and recheck:
+                    record["recheck_mcp_actions"] = True
                 if status == "requires_attention" and not record["error"]:
                     record["error"] = (
                         evidence.stop_error
@@ -323,6 +322,99 @@ class TaskRunner:
                 job.done.set()
                 if self._closed:
                     self._lease.close()
+
+    def _settled_status(self, job: _Job, exit_code: int, evidence: TaskEvidence) -> str:
+        record = job.record
+        finish = (record.get("finish") or {}).get("status")
+        if record["stop_requested"]:
+            return "stopped"
+        if exit_code != 0 or record.get("error") or finish in {"failure", "stuck"}:
+            return "failed"
+        if evidence.verification_required:
+            return "verification_required"
+        if finish == "success":
+            return "succeeded"
+        if re.search(r"Request budget of \d+ reached\.", self._log_tail(job, 65536)):
+            return "budget_exhausted"
+        return "incomplete"
+
+    def reconcile_actions(self) -> None:
+        """Release the gate after late terminal receipts for known remote actions."""
+        with self._lock:
+            if self._closed or self._active is not None or not self._requires_attention:
+                return
+            pending = [
+                (path, record)
+                for path in sorted(self.jobs_dir.glob("*/job.json"))
+                if (record := _read_json(path))["status"] in ATTENTION_STATUSES
+            ]
+            if not pending:
+                return
+            for path, record in pending:
+                try:
+                    self._reconcile_action(path, record)
+                except (OSError, KeyError, ValueError) as exc:
+                    logger.warning(
+                        "Cannot reconcile task %s: %s", path.parent.name, exc
+                    )
+            self._requires_attention = any(
+                _read_json(path)["status"] in ATTENTION_STATUSES for path, _ in pending
+            )
+
+    def _reconcile_action(self, path: Path, record: dict[str, Any]) -> None:
+        exit_code = record.get("exit_code")
+        if (
+            record["status"] != "requires_attention"
+            or type(exit_code) is not int
+            or exit_code < 0
+            or record.get("forced_stop")
+            or not record.get("finished_at")
+        ):
+            return
+        previous_error = record.get("error")
+        if not record.get("recheck_mcp_actions") and not isinstance(
+            previous_error, str
+        ):
+            return
+        snapshot = load_deployment(path.parent / "mcp.toml")
+        if (
+            snapshot.robot.id != self.deployment.robot.id
+            or snapshot.robot.environment != self.deployment.robot.environment
+            or snapshot.execution.read_evidence is not None
+            or (record.get("stop_requested") and snapshot.robot.environment == "real")
+        ):
+            return
+        output = path.parent / "output"
+        if not has_known_mcp_actions(
+            snapshot.servers,
+            output,
+            legacy_error=None if record.get("recheck_mcp_actions") else previous_error,
+        ):
+            return
+        evidence = collect_run_evidence(
+            snapshot.servers,
+            output,
+            record["run_id"],
+            timeout_s=0,
+            initial=TaskEvidence(data=record.get("evidence") or {}),
+        )
+        if evidence.requires_attention:
+            return
+        transcripts = sorted(output.glob("transcript_*.json"))
+        transcript = _read_json(transcripts[-1]) if transcripts else {}
+        record.update(
+            error=transcript.get("error") or evidence.error,
+            evidence=evidence.data,
+            reconciliation={
+                "verified_at": _now(),
+                "previous_status": "requires_attention",
+                "previous_error": previous_error,
+            },
+        )
+        job = _Job(record, path.parent)
+        record["status"] = self._settled_status(job, exit_code, evidence)
+        self._persist(job)
+        logger.info("Reconciled task %s as %s", path.parent.name, record["status"])
 
     def wait(self, job: _Job, timeout_s: float | None = None) -> dict[str, Any]:
         """Wait for the owned process to finish and return its recorded result."""

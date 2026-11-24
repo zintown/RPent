@@ -9,6 +9,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import closing
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Annotated, Any
 
 from anyio import CancelScope, get_cancelled_exc_class, to_thread
@@ -18,9 +21,11 @@ from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
-from rpent.mcp.task.config import TaskDeployment
+from rpent.mcp.task.config import ReadOnlyQueryConfig, TaskDeployment
 from rpent.mcp.task.discovery import RobotInfo, RobotState, check_robot
 from rpent.mcp.task.runner import TaskRunner
+from rpent.tools.mcp_client import McpServiceError
+from rpent.tools.mcp_registry import McpServiceRegistry
 
 
 class TaskResult(BaseModel):
@@ -35,6 +40,52 @@ class TaskResult(BaseModel):
     navigation: dict[str, Any] | None
 
 
+class QueryResult(BaseModel):
+    """Live observations and source-specific query errors."""
+
+    robot_id: str
+    results: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    errors: dict[str, str] = Field(default_factory=dict)
+
+
+def _query(deployment: TaskDeployment, config: ReadOnlyQueryConfig) -> QueryResult:
+    result = QueryResult(robot_id=deployment.robot.id)
+    with (
+        TemporaryDirectory(prefix="rpent-mcp-query-") as output,
+        closing(
+            McpServiceRegistry(deployment.servers, probe_output=Path(output))
+        ) as registry,
+    ):
+        for reference in dict.fromkeys(config.tools):
+            service, name = reference.split(".", 1)
+            try:
+                data = registry.connect(service).read_check(name)
+            except McpServiceError as exc:
+                result.errors[reference] = str(exc)
+                continue
+            if data.get("ok") is False:
+                result.errors[reference] = str(
+                    data.get("reason") or data.get("error") or f"{reference} failed"
+                )
+            else:
+                result.results[reference] = data
+    return result
+
+
+def _register_query(
+    server: FastMCP, deployment: TaskDeployment, name: str, config: ReadOnlyQueryConfig
+) -> None:
+    async def query_tool() -> QueryResult:
+        return await to_thread.run_sync(_query, deployment, config)
+
+    server.add_tool(
+        query_tool,
+        name=name,
+        description=config.description,
+        annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False),
+    )
+
+
 def _runner_state(runner: TaskRunner) -> RobotState:
     health = runner.health()
     if health["requires_attention"]:
@@ -45,6 +96,7 @@ def _runner_state(runner: TaskRunner) -> RobotState:
 
 
 def _robot_info(runner: TaskRunner, deployment: TaskDeployment) -> RobotInfo:
+    runner.reconcile_actions()
     info = check_robot(deployment, _runner_state(runner))
     # A task may have claimed or released the runner during downstream discovery.
     latest = _runner_state(runner)
@@ -80,12 +132,19 @@ def create_task_mcp(
                 "http://[::1]:*",
             ],
         )
+    query_instructions = (
+        "Use the available read-only query tools for matching information requests, "
+        "including while the runner is busy or needs attention. "
+        if deployment.read_only_queries
+        else ""
+    )
     server = FastMCP(
         "rpent-tasks",
         instructions=(
             f"This endpoint controls {robot_id}. Call get_robot_info to check its "
             "identity, environment and capabilities before dispatch. Choose an idle "
             "robot with the ready capabilities required by the instruction. "
+            f"{query_instructions}"
             "Use run_task to execute a complete instruction. "
             "Preserve the requested action, order, and acceptance criteria. "
             "The tool returns the terminal status. Use its summary and execution "
@@ -131,4 +190,6 @@ def create_task_mcp(
             navigation=record["navigation"],
         )
 
+    for name, config in deployment.read_only_queries.items():
+        _register_query(server, deployment, name, config)
     return server

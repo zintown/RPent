@@ -16,18 +16,16 @@
 
 from __future__ import annotations
 
-import base64
 import json
 import os
 import re
 from collections import ChainMap
 from collections.abc import AsyncIterator, Callable, Mapping
 from concurrent.futures import wait
-from contextlib import ExitStack, asynccontextmanager
-from functools import partial
+from contextlib import ExitStack, asynccontextmanager, closing
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 
 import httpx
@@ -35,18 +33,51 @@ from anyio import fail_after
 from anyio.from_thread import start_blocking_portal
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError
 from mcp import ClientSession, types
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.message import SessionMessage
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from rpent.tools.base import Tool, ToolResult
+from rpent.tools.base import Tool
 
 try:
     import tomllib
 except ModuleNotFoundError:
     import tomli as tomllib
+
+
+McpCheckValue = bool | int | float | str
+_NonemptyName = Annotated[str, Field(min_length=1)]
+_ToolReference = Annotated[str, Field(pattern=r"^[A-Za-z0-9_-]+\.\S+$")]
+
+
+class McpActionStatusConfig(BaseModel):
+    """Describe how to correlate an asynchronous action with its status."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    start_tool: _NonemptyName
+    status_tool: _NonemptyName
+    id_field: _NonemptyName
+    status_id_field: _NonemptyName | None = None
+    status_id_argument: _NonemptyName | None = None
+    terminal: Annotated[dict[str, McpCheckValue], Field(min_length=1)]
+    success: Annotated[dict[str, McpCheckValue], Field(min_length=1)]
+    rejected: dict[str, McpCheckValue] = Field(default_factory=dict)
+    wait_for_terminal: bool = False
+    completion_timeout_sec: float = Field(default=300, gt=0, allow_inf_nan=False)
+    poll_interval_sec: float = Field(default=2, gt=0, allow_inf_nan=False)
+    preflight: dict[_ToolReference, dict[str, McpCheckValue]] = Field(
+        default_factory=dict
+    )
+
+    @model_validator(mode="after")
+    def validate_tools(self) -> McpActionStatusConfig:
+        if self.start_tool == self.status_tool:
+            raise ValueError("action_status requires distinct start and status tools")
+        return self
 
 
 class McpServerConfig(BaseModel):
@@ -62,10 +93,13 @@ class McpServerConfig(BaseModel):
     env_from: list[str] = Field(default_factory=list)
     enabled: bool = True
     enabled_tools: list[str] | None = None
+    model_tools: list[str] | None = None
+    read_only_tools: list[_NonemptyName] = Field(default_factory=list)
     startup_timeout_sec: float = Field(default=5, gt=0, allow_inf_nan=False)
     tool_timeout_sec: float = Field(default=10, gt=0, allow_inf_nan=False)
     bearer_token_env_var: str | None = None
     run_report_tool: str | None = Field(default=None, min_length=1)
+    action_status: McpActionStatusConfig | None = None
 
     @field_validator("url")
     @classmethod
@@ -113,6 +147,27 @@ class McpServerConfig(BaseModel):
                 or self.env_from
             ):
                 raise ValueError("command, args, cwd and env_from apply to stdio MCP")
+        return self
+
+    @model_validator(mode="after")
+    def validate_model_tools(self) -> McpServerConfig:
+        if self.model_tools is not None:
+            visible = set(self.model_tools)
+            if self.enabled_tools is not None and visible - set(self.enabled_tools):
+                raise ValueError("model_tools must be included in enabled_tools")
+            if self.run_report_tool in visible:
+                raise ValueError(
+                    "run_report_tool is reserved for collecting execution evidence"
+                )
+        return self
+
+    @model_validator(mode="after")
+    def validate_action_status(self) -> McpServerConfig:
+        if self.action_status is not None:
+            if self.run_report_tool is not None:
+                raise ValueError("configure either run_report_tool or action_status")
+            if self.action_status.start_tool in self.read_only_tools:
+                raise ValueError("the action start tool cannot be read-only")
         return self
 
 
@@ -239,6 +294,7 @@ class McpClient:
     ) -> None:
         self.name = name
         self._timeout = config.tool_timeout_sec
+        self._read_only_tools = frozenset(config.read_only_tools)
         self._run_id = run_id
         environment = ChainMap(env_overrides or {}, os.environ)
         headers = {}
@@ -304,7 +360,7 @@ class McpClient:
         self._connections.close()
 
     def select_tools(self, config: McpServerConfig) -> dict[str, types.Tool]:
-        """Resolve the planner's allowlist and reserve the reporting tool."""
+        """Resolve enabled tools and reserve the reporting tool."""
         if config.run_report_tool is not None:
             self.require_readonly_tool(config.run_report_tool)
         names = self.tools if config.enabled_tools is None else config.enabled_tools
@@ -319,23 +375,51 @@ class McpClient:
             selected[name] = self.tools[name]
         return selected
 
-    def require_readonly_tool(self, name: str) -> None:
-        """Validate an exported read-only tool that can be called without arguments."""
+    def is_readonly_tool(self, name: str) -> bool:
+        """Use a read-only declaration from the service or its deployment."""
         definition = self.tools.get(name)
-        if not (
-            definition
-            and definition.annotations
-            and definition.annotations.readOnlyHint is True
-            and Draft202012Validator(definition.inputSchema).is_valid({})
-        ):
-            raise McpServiceError(
-                f"{self.name}.{name} must be an exported read-only tool callable without arguments"
-            )
+        if definition is None:
+            return False
+        annotations = definition.annotations
+        if annotations is not None and annotations.readOnlyHint is not None:
+            return annotations.readOnlyHint
+        return name in self._read_only_tools and not (
+            annotations is not None and annotations.destructiveHint is True
+        )
 
-    def read_check(self, name: str) -> dict[str, Any]:
+    def require_readonly_tool(
+        self, name: str, arguments: dict[str, Any] | None = None
+    ) -> None:
+        """Validate the read-only tool and its intended arguments."""
+        definition = self.tools.get(name)
+        if definition is not None and self.is_readonly_tool(name):
+            try:
+                Draft202012Validator.check_schema(definition.inputSchema)
+                if Draft202012Validator(definition.inputSchema).is_valid(
+                    arguments or {}
+                ):
+                    return
+            except SchemaError as exc:
+                raise McpServiceError(
+                    f"{self.name}.{name} has an invalid input schema"
+                ) from exc
+        raise McpServiceError(
+            f"{self.name}.{name} must be an exported read-only tool accepting the supplied arguments"
+        )
+
+    def read_check(
+        self,
+        name: str,
+        arguments: dict[str, Any] | None = None,
+        *,
+        timeout_s: float = 8,
+        check_cancelled: Callable[[], None] | None = None,
+    ) -> dict[str, Any]:
         """Call a read-only check with a short deadline and decode its object result."""
-        self.require_readonly_tool(name)
-        result = self.call_tool(name, {}, timeout_s=8)
+        self.require_readonly_tool(name, arguments)
+        result = self.call_tool(
+            name, arguments or {}, timeout_s=timeout_s, check_cancelled=check_cancelled
+        )
         message = next(
             (
                 block.text
@@ -346,30 +430,38 @@ class McpClient:
         )
         if result.isError:
             raise McpServiceError(message or f"{self.name}.{name} returned an error")
-        if result.structuredContent is not None:
-            return result.structuredContent
-        if len(result.content) == 1 and message:
-            try:
-                data = json.loads(message)
-            except ValueError as exc:
-                raise McpServiceError(
-                    f"{self.name}.{name} returned invalid JSON"
-                ) from exc
-            if isinstance(data, dict):
-                return data
+        if (data := mcp_result_object(result)) is not None:
+            return data
         raise McpServiceError(f"{self.name}.{name} must return a JSON object")
 
 
-def check_matches(
-    data: dict[str, Any], key: str, expected: bool | int | float | str
-) -> bool:
-    """Match a check field using its dotted path, scalar value and type."""
-    value: Any = data
-    for part in key.split("."):
-        if not isinstance(value, dict) or part not in value:
-            return False
-        value = value[part]
-    return type(value) is type(expected) and value == expected
+def mcp_result_object(result: types.CallToolResult) -> dict[str, Any] | None:
+    """Read structuredContent or a single JSON object in text content."""
+    if result.structuredContent is not None:
+        return result.structuredContent
+    if len(result.content) != 1 or not isinstance(result.content[0], types.TextContent):
+        return None
+    try:
+        data = json.loads(result.content[0].text)
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def check_matches(data: dict[str, Any], key: str, expected: McpCheckValue) -> bool:
+    """Match a dotted path, using * for every member of a nonempty list."""
+
+    def matches(value: Any, path: list[str]) -> bool:
+        if not path:
+            return type(value) is type(expected) and value == expected
+        part, *remaining = path
+        if isinstance(value, dict) and part in value:
+            return matches(value[part], remaining)
+        if part == "*" and isinstance(value, list):
+            return bool(value) and all(matches(item, remaining) for item in value)
+        return False
+
+    return matches(data, key.split("."))
 
 
 def mcp_tool_name(server: str, remote_name: str) -> str:
@@ -381,81 +473,13 @@ def mcp_tool_name(server: str, remote_name: str) -> str:
     return name
 
 
-def _invoke(
-    client: McpClient,
-    name: str,
-    check_cancelled: Callable[[], None],
-    action_marker: Path | None,
-    /,
-    **arguments: Any,
-) -> ToolResult:
-    try:
-        check_cancelled()
-        if action_marker is not None:
-            action_marker.parent.mkdir(exist_ok=True)
-            action_marker.touch()
-        result = client.call_tool(name, arguments, check_cancelled=check_cancelled)
-    except McpServiceError as exc:
-        return ToolResult(data={"error": str(exc)})
-    data: dict[str, Any] = {}
-    images = []
-    content = []
-    messages = []
-    for block in result.content:
-        if isinstance(block, types.TextContent):
-            content.append({"type": "text", "text": block.text})
-            messages.append(block.text)
-        elif isinstance(block, types.ImageContent) and block.mimeType == "image/png":
-            images.append(base64.b64decode(block.data, validate=True))
-        else:
-            content.append(
-                {"type": block.type, "notice": "MCP content type unavailable"}
-            )
-    if content:
-        data["content"] = content
-    if result.structuredContent is not None:
-        data["structured_content"] = result.structuredContent
-    if result.isError:
-        data["error"] = (
-            "\n".join(messages) or f"MCP {client.name}/{name} returned an error"
-        )
-    return ToolResult(data=data, images=images)
-
-
 def discover_mcp_tools(
     servers: dict[str, McpServerConfig],
     connections: ExitStack,
     check_cancelled: Callable[[], None],
 ) -> list[Tool]:
-    """Connect enabled servers and build declarations from their JSON Schemas."""
-    declarations = []
-    run_id = os.environ.get("RPENT_MCP_RUN_ID")
-    output = os.environ.get("RPENT_TASK_OUTPUT_DIR")
-    for name, config in servers.items():
-        if not config.enabled or config.enabled_tools == []:
-            continue
-        client = McpClient(
-            name, config, run_id=run_id if config.run_report_tool else None
-        )
-        connections.callback(client.close)
-        for raw_name, definition in client.select_tools(config).items():
-            Draft202012Validator.check_schema(definition.inputSchema)
-            readonly = (
-                definition.annotations and definition.annotations.readOnlyHint is True
-            )
-            marker = (
-                Path(output) / ".mcp-actions" / name
-                if run_id and output and config.run_report_tool and not readonly
-                else None
-            )
-            declarations.append(
-                Tool(
-                    name=mcp_tool_name(name, raw_name),
-                    description=definition.description or raw_name,
-                    args_schema=None,
-                    handler=partial(_invoke, client, raw_name, check_cancelled, marker),
-                    _input_schema=definition.inputSchema,
-                    capture_state=False,
-                )
-            )
-    return declarations
+    """Build model tools and attach the registry to the caller's lifetime."""
+    from rpent.tools.mcp_registry import McpServiceRegistry
+
+    registry = connections.enter_context(closing(McpServiceRegistry(servers)))
+    return registry.model_tools(servers, check_cancelled)

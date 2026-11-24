@@ -25,12 +25,12 @@ from rpent.robots.prompt_bundle import PromptBundle
 from rpent.robots.robot_spec import RobotSpec, RunConfig, TaskExecutionSpec
 from rpent.session import EnvState
 from rpent.tools import Toolkit, ToolResult, iter_tools, tool
-from rpent.tools.mcp_client import McpServerConfig, McpServiceError
+from rpent.tools.mcp_client import McpServiceError
 from rpent.utils.daemon import ProcessDaemon
 
 
 class NavigationToolkit(Toolkit):
-    """Expose navigation and status without exposing the executor's raw actions."""
+    """Expose verified navigation operations using the task's MCP registry."""
 
     def __init__(
         self,
@@ -46,24 +46,17 @@ class NavigationToolkit(Toolkit):
         )
         self.services = services
         self.navigation = Navigation(
-            services, config.output_dir, self.raise_if_cancelled
+            services, self.mcp_registry, config.output_dir, self.raise_if_cancelled
         )
         self.add_tools(replace(tool, capture_state=False) for tool in iter_tools(self))
-
-    def add_mcp_tools(self, servers: dict[str, McpServerConfig]) -> None:
-        super().add_mcp_tools(
-            {
-                name: config
-                for name, config in servers.items()
-                if name not in self.services.configs
-            }
-        )
 
     @tool(readonly=True)
     def get_navigation_status(self) -> ToolResult:
         """Check if the remote map and simulator are ready for navigation."""
         try:
-            reference = self.services.ready_map(self.raise_if_cancelled)
+            reference = self.services.ready_map(
+                self.mcp_registry, self.raise_if_cancelled
+            )
         except McpServiceError as exc:
             return ToolResult(data={"ready": False, "reason": str(exc)})
         return ToolResult(data={"ready": True, **reference.model_dump()})
@@ -72,10 +65,12 @@ class NavigationToolkit(Toolkit):
     def get_pose(self) -> ToolResult:
         """Read the robot's current map position and heading in meters and radians."""
         try:
-            with self.services.connect(
-                "localization", check_cancelled=self.raise_if_cancelled
-            ) as providers:
-                pose = providers["localization"].pose()
+            providers = self.services.providers(
+                self.mcp_registry,
+                "localization",
+                check_cancelled=self.raise_if_cancelled,
+            )
+            pose = providers["localization"].pose()
         except McpServiceError as exc:
             return ToolResult(data={"error": str(exc)})
         return ToolResult(data=pose.model_dump())
@@ -113,7 +108,11 @@ def _configure_deployment(deployment: TaskDeployment) -> TaskDeployment:
     return replace(
         deployment,
         execution=replace(
-            deployment.execution, check_capability=services.check_capability
+            deployment.execution,
+            capability_checks={
+                **deployment.execution.capability_checks,
+                "map_navigation": services.check_readiness,
+            },
         ),
     )
 
@@ -127,6 +126,7 @@ def _validate_args(args: Namespace) -> None:
             "remote_navigation requires [robot].adapter = 'remote_navigation'"
         )
     args.navigation_services = NavigationServices.from_deployment(deployment)
+    args.mcp_servers = deployment.servers
 
 
 def _init_runtime(

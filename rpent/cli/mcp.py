@@ -27,13 +27,10 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 
 import tomlkit
-from jsonschema import Draft202012Validator
-from jsonschema.exceptions import SchemaError
 from tomlkit.exceptions import TOMLKitError
 from tomlkit.toml_document import TOMLDocument
 
 from rpent.tools.mcp_client import (
-    McpClient,
     McpServerConfig,
     McpServiceError,
     load_mcp_servers,
@@ -41,6 +38,7 @@ from rpent.tools.mcp_client import (
     parse_mcp_servers,
     validate_mcp_server_name,
 )
+from rpent.tools.mcp_registry import McpServiceRegistry
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -179,15 +177,13 @@ def _test_server(name: str, path: Path, checks: list[str]) -> int:
     if not server.enabled or server.enabled_tools == []:
         raise ValueError(f"MCP server {name!r} has no enabled tools")
     failed = False
-    with closing(McpClient(name, server)) as client:
-        tools = client.select_tools(server)
-        for definition in tools.values():
-            Draft202012Validator.check_schema(definition.inputSchema)
+    with closing(McpServiceRegistry({name: server})) as registry:
+        service = registry.connect(name)
         print(f"Connected to {name} ({server.transport})")
-        for tool in tools:
+        for tool in service.tools:
             print(mcp_tool_name(name, tool))
         for tool in checks:
-            result = client.read_check(tool)
+            result = service.read_check(tool)
             print(f"{name}.{tool}\t{json.dumps(result, ensure_ascii=False)}")
             failed = failed or result.get("ok") is False or result.get("ready") is False
     return int(failed)
@@ -222,6 +218,6 @@ def main(argv: list[str]) -> int:
                 _edit_config(path, name, server)
                 verb = "Added" if server is not None else "Removed"
                 print(f"{verb} MCP server {name!r} in {path}")
-    except (McpServiceError, OSError, SchemaError, TOMLKitError, ValueError) as exc:
+    except (McpServiceError, OSError, TOMLKitError, ValueError) as exc:
         parser.error(str(exc))
     return 0

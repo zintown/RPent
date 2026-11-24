@@ -22,10 +22,16 @@ bash run_rpent.sh '查询远程 Go2 仿真是否可以导航'
 
 ## 提交地图导航任务
 
-远程仿真器运行且与 A* 使用相同地图版本时，可以提交导航任务。RPent 读取仿真位姿后调用 A*，把完整规划交给 MuJoCo，再按行走编号确认逐段到达。目标名称和编号以远程地图为准。
+远程仿真器运行且与 A* 使用相同地图版本时，可以提交导航任务。默认配置将 MCP 工具直接提供给任务模型。模型可以读取仿真位姿、调用 A*、引用完整规划让 MuJoCo 行走，并按行走编号查询逐段到达的结果。目标名称和编号以远程地图为准。
 
 ```bash
 bash run_rpent.sh '前往广告牌，确认到达'
 ```
 
 同一条指令也可以[通过 DSH 提交](TASK_MCP.zh-CN.md)。
+
+需要固定的地图和导航校验，或取消时自动停止本次行走，可选择 [`remote_navigation` 配置](../remote_navigation/mcp.toml)。
+
+```bash
+RPENT_MCP_CONFIG="$PWD/robots/remote_navigation/mcp.toml" bash run_rpent.sh '前往广告牌，确认到达'
+```

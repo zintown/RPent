@@ -18,6 +18,7 @@ import pytest
 from anyio import fail_after
 from mcp import ClientSession, types
 from mcp.client.streamable_http import streamable_http_client
+from mcp.server.fastmcp import FastMCP
 
 from rpent.mcp.task.server import create_app, main
 
@@ -146,6 +147,84 @@ def test_run_task_schema_and_terminal_result(root, path):
         assert launches == [[instruction], [instruction]]
 
     asyncio.run(run())
+
+
+def test_read_only_map_query_works_when_runner_needs_attention(root, serve_mcp):
+    remote = FastMCP("map", stateless_http=True, json_response=True)
+    calls = []
+
+    @remote.tool()
+    def list_waypoints() -> dict:
+        calls.append("waypoints")
+        return {"ok": True, "waypoints": [{"id": "wp_02", "name": "广告牌"}]}
+
+    @remote.tool()
+    def list_scene_graph() -> dict:
+        calls.append("scene_graph")
+        return {"ok": True, "nodes": [{"id": "region_hall", "name": "大厅"}]}
+
+    @remote.tool(annotations=types.ToolAnnotations(readOnlyHint=False))
+    def walk() -> dict:
+        calls.append("walk")
+        return {"ok": True}
+
+    pending = root / "jobs" / "run-previous" / "job.json"
+    pending.parent.mkdir(parents=True)
+    pending.write_text('{"status": "requires_attention"}')
+
+    async def run():
+        async with connect(make_app(root)) as (session, _, info, _):
+            tools = {tool.name: tool for tool in (await session.list_tools()).tools}
+            advertised = tools["list_navigation_targets"]
+            assert advertised.annotations.readOnlyHint
+            assert not advertised.inputSchema["properties"]
+            assert (
+                "including while the runner is busy or needs attention"
+                in info.instructions
+            )
+            blocked = await session.call_tool("run_task", {"instruction": "前往大厅"})
+            assert blocked.isError
+            query = await session.call_tool("list_navigation_targets", {})
+            assert not query.isError, query
+            assert query.structuredContent == {
+                "robot_id": "go2-test",
+                "results": {
+                    "map.list_waypoints": {
+                        "ok": True,
+                        "waypoints": [{"id": "wp_02", "name": "广告牌"}],
+                    },
+                    "map.list_scene_graph": {
+                        "ok": True,
+                        "nodes": [{"id": "region_hall", "name": "大厅"}],
+                    },
+                },
+                "errors": {},
+            }
+            denied = await session.call_tool("invalid_query", {})
+            assert not denied.structuredContent["results"]
+            assert "read-only" in denied.structuredContent["errors"]["map.walk"]
+            status = await session.call_tool("get_robot_info", {})
+            assert status.structuredContent["state"] == "requires_attention"
+
+    with serve_mcp(remote) as url:
+        config = root / "mcp.toml"
+        with config.open("a") as file:
+            file.write(
+                "[mcp_servers.map]\n"
+                f'url = "{url}"\n'
+                'enabled_tools = ["walk"]\n'
+                'read_only_tools = ["list_waypoints", "list_scene_graph", "walk"]\n'
+                "[read_only_queries.list_navigation_targets]\n"
+                'description = "查询地图可导航地点"\n'
+                'tools = ["map.list_waypoints", "map.list_scene_graph"]\n'
+                "[read_only_queries.invalid_query]\n"
+                'description = "调用一个可写工具"\n'
+                'tools = ["map.walk"]\n'
+            )
+        asyncio.run(run())
+
+    assert calls == ["waypoints", "scene_graph"]
+    assert not (root / "launches.jsonl").exists()
 
 
 def test_capabilities_reflect_discovered_tools_and_live_read_only_checks(root):

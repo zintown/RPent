@@ -27,7 +27,7 @@ that keep CLI orchestration independent of concrete robot implementations.
 from __future__ import annotations
 
 import argparse
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -39,6 +39,7 @@ from rpent.robots.prompt_bundle import PromptBundle
 
 if TYPE_CHECKING:
     from rpent.mcp.task.config import TaskDeployment
+    from rpent.tools.mcp_registry import McpServiceRegistry
     from rpent.utils.daemon import ProcessDaemon
 
 
@@ -70,8 +71,10 @@ class TaskExecutionSpec:
 
     read_evidence: Callable[[Path, dict[str, Any]], TaskEvidence] | None = None
     configure_deployment: Callable[[TaskDeployment], TaskDeployment] | None = None
-    # Return a readiness problem for a bound capability, or None when ready.
-    check_capability: Callable[[str], str | None] | None = None
+    # Each bound capability can check readiness using the same probe registry.
+    capability_checks: Mapping[str, Callable[[McpServiceRegistry], str | None]] = field(
+        default_factory=dict
+    )
 
 
 @dataclass(frozen=True)

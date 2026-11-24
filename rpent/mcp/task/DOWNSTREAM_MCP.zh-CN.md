@@ -29,11 +29,27 @@
 
 更新工具时应保留现有入参和结果的含义。需要增加必填参数或改变字段含义时，应使用新工具名或版本化端点，并同步更新使用方配置。两个后端共用同一工具契约时，应保持参数、单位、结果和完成条件一致。
 
+### 跨服务传递工具结果
+
+成功返回 `structuredContent` 的工具调用会附带当前任务内的 `result_id`。模型可将该结果作为另一工具的参数，RPent 用目标工具公布的参数定义校验实际值。以下是调用 `mcp_call_with_refs` 的参数，`result_id` 来自前一次规划调用。
+
+```json
+{
+  "tool_name": "mcp__sim__walk_start",
+  "arguments": {},
+  "references": {
+    "plan": {"result_id": "9bbb4277cbed47259361cc69e393e65a"}
+  }
+}
+```
+
+省略 `path` 会使用完整的结构化结果。也可以用 `"path": ["pose", "x"]` 选择嵌套字段，路径中的整数表示数组索引。运行时使用同一任务内保存的原始对象，即使模型看到的文本已截断。目标工具需出现在模型的工具列表中。
+
 ## 3. 能力与就绪检查
 
-RPent 用 `[mcp_servers.<服务名>]` 登记下游服务。`enabled_tools` 填写下游原始工具名，用于控制任务模型能调用的工具。部署中的 `[capabilities]` 使用 `服务名.工具名` 声明一个能力需要哪些工具，可以引用多个服务。
+RPent 用 `[mcp_servers.<服务名>]` 登记下游服务。`enabled_tools` 填写允许调用的下游原始工具名。`model_tools` 可从中选择公开给任务模型的工具，空列表表示供工作流内部调用。普通服务默认公开启用的工具，使用 `bindings` 的服务默认公开给工作流。部署中的 `[capabilities]` 使用 `服务名.工具名` 声明一个能力需要哪些模型工具，可以引用多个服务。
 
-部署把工具用于 `checks` 时，该工具必须可以用 `{}` 调用，具有 `readOnlyHint = true`，并返回 JSON 对象。只读检查应仅观察当前状态，允许重复调用。RPent 优先读 `structuredContent`，也接受单个文本块承载的 JSON 对象。配置中可用点号匹配嵌套字段。字段值和类型均需匹配。[能力检查实现](discovery.py) · [只读工具校验](../../tools/mcp_client.py)
+部署把工具用于 `checks` 时，该工具应能用 `{}` 调用，并返回 JSON 对象。只读工具可以由服务声明 `readOnlyHint = true`，也可由部署通过 `read_only_tools` 声明。服务显式声明为可写或破坏性的工具应按服务声明处理。只读检查应仅观察当前状态，允许重复调用。RPent 优先读 `structuredContent`，也接受单个文本块承载的 JSON 对象。配置中可用点号匹配嵌套字段，用 `*` 匹配非空数组的每个元素。字段值和类型均需匹配。[能力检查实现](discovery.py) · [只读工具校验](../../tools/mcp_client.py)
 
 以下是 `tools/list` 中一个检查工具的定义。
 
@@ -65,6 +81,15 @@ RPent 用 `[mcp_servers.<服务名>]` 登记下游服务。`enabled_tools` 填�
 ```
 
 服务正常响应但暂时无法接收动作时，可返回 `{"ready": false, "reason": "控制器正在执行上一条动作"}`。能力所需工具和就绪检查均满足时，RPent 可以向上游报告 `ready`。工具缺失或检查失败时报告 `unavailable`，已发现所需工具但缺少就绪检查时报告 `unverified`。
+
+检查的预期值也可以引用另一个只读查询的标量字段。默认 Go2 配置通过这些引用核对 A* 和 MuJoCo 的地图编号与版本。
+
+```toml
+[capabilities.map_navigation.checks."sim.sim_status"]
+simulator_running = true
+map_id = { tool = "astar.service_health", field = "map_id" }
+map_version = { tool = "astar.service_health", field = "map_version" }
+```
 
 ## 4. 动作执行与回执
 
@@ -117,6 +142,22 @@ RPent 用 `[mcp_servers.<服务名>]` 登记下游服务。`enabled_tools` 填�
   "requires_attention": false
 }
 ```
+
+### 按动作编号核对状态
+
+已有异步提交和查询接口的服务，可以配置 `action_status`。RPent 在提交前记录尝试，用响应中的动作 ID 关联查询结果，并依据配置确认终态和成功。状态工具需要能无参只读查询所记录的动作。下面的配置对应默认仿真服务。
+
+```toml
+[mcp_servers.sim.action_status]
+start_tool = "walk_start"
+status_tool = "walk_status"
+id_field = "walk_id"
+terminal = { state = "finished" }
+success = { "result.ok" = true, "result.legs.*.reached" = true, "pose.fallen" = false }
+rejected = { ok = false }
+```
+
+`rejected` 可识别有明确拒绝依据的提交响应。提交响应和状态以结构化对象返回。查询字段与本次动作 ID 匹配后才采用所报告的终态。HTTP 服务可在任务收尾时重新查询。结束状态仍待确认时，任务返回 `requires_attention`。配置 `action_status` 或 `run_report_tool` 来提供对应服务的动作证据。
 
 ## 5. 部署示例
 
