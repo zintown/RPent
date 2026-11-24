@@ -77,6 +77,41 @@ RPent 通过一个 CLI 参数选择 Agentic Planner 的后端：
 
 终端交互方式见 :ref:`终端交互 <quickstart-interactive>`。
 
+.. _planner-external-mcp:
+
+外部 MCP 服务
+--------------
+
+通过 ``--mcp-config FILE`` 加载 TOML 配置。RPent 在任务启动时发现
+已启用服务的工具，以 ``mcp__<name>__<tool>`` 提供给规划模型。
+任务结束时，RPent 关闭连接和它启动的 stdio 子进程。
+
+在各个 ``[mcp_servers.<name>]`` 表中指定传输方式。
+
+- 默认使用 ``streamable-http``。将 MCP 地址填入 ``url``，
+  需要鉴权时用 ``bearer_token_env_var`` 指定令牌所在的环境变量。
+- 使用 ``stdio`` 时，填写 ``command``，将参数逐项写入 ``args``。
+  子进程默认使用 RPent 的工作目录。相对 ``cwd`` 以配置文件目录为基准。
+  需要额外传入环境变量时，在 ``env_from`` 中列出名称。
+
+- ``enabled`` 默认开启。使用 ``enabled_tools`` 选择提供给模型的工具。
+- ``startup_timeout_sec`` 和 ``tool_timeout_sec`` 分别控制发现和调用的时限，默认 5 秒和 10 秒。
+
+用 ``rpent mcp`` 管理配置。省略 ``--mcp-config`` 时，管理命令
+读取 ``RPENT_MCP_CONFIG``，或使用当前目录的 ``mcp.toml``。
+
+.. code-block:: bash
+
+   rpent mcp --mcp-config mcp.toml add planner --url http://127.0.0.1:8790/mcp
+   rpent mcp --mcp-config mcp.toml add calculator -- python /path/to/calculator.py
+   rpent mcp --mcp-config mcp.toml list
+   rpent mcp --mcp-config mcp.toml test calculator
+   rpent mcp --mcp-config mcp.toml remove calculator
+
+``test`` 建立连接并列出 RPent 可用的工具。测试 stdio 时会启动
+配置的命令，完成发现后关闭子进程。让任务启动入口读取同一份文件，
+配置变更会在下一条任务生效。
+
 .. _planner-claude-code:
 
 ``claude_code`` 规划器
@@ -95,7 +130,7 @@ RPent 为 Claude 规划会话关闭文件系统配置来源，因此不会自动
 注意事项：
 
 - ``--model`` **不要** 加模型提供商前缀；省略时默认使用 ``sonnet``。
-- 非交互运行受 ``--planner-timeout-s`` 限制；默认读取 ``CELL_TIMEOUT_S``，未设置时为 ``1200`` 秒。``--interactive`` 模式不应用这一时限。
+- 非交互运行受 ``--planner-timeout-s`` 限制；默认读取 ``CELL_TIMEOUT_S``，未设置时为 ``1200`` 秒。``--tui`` 模式不应用这一时限。
 - 通过 ``--claude-code-max-budget-usd`` 设置美元预算（默认取 ``MAX_BUDGET_USD`` 环境变量或 ``10``）。
 - RPent 的依赖中已包含 Claude Agent SDK；该 SDK 自带 Claude Code 二进制文件，无需单独安装 CLI。认证通常使用 ``ANTHROPIC_API_KEY``，详见 `Claude Agent SDK 文档 <https://code.claude.com/docs/en/agent-sdk/overview>`_。
 

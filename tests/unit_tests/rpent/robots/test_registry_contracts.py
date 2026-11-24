@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+from argparse import ArgumentParser
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from string import Formatter
@@ -33,6 +34,8 @@ EXPECTED_ROBOTS = (
     "dual_franka",
     "franka",
     "libero",
+    "mcp",
+    "remote_navigation",
     "robocasa",
     "robodojo",
     "robotwin",
@@ -40,9 +43,15 @@ EXPECTED_ROBOTS = (
     "yam",
 )
 
-EXPECTED_DASHBOARD_ROBOTS = tuple(name for name in EXPECTED_ROBOTS if name != "unitree")
+EXPECTED_DASHBOARD_ROBOTS = tuple(
+    name
+    for name in EXPECTED_ROBOTS
+    if name not in {"mcp", "remote_navigation", "unitree"}
+)
 
 PROMPT_VARIABLES = {
+    "mcp": {"task": "Read the arm's status"},
+    "remote_navigation": {"task": "前往广告牌"},
     "unitree": {"task": "让机器狗往前走", "env_endpoint": "http://127.0.0.1:8115"},
     "yam": {
         "task_id": 1,
@@ -79,6 +88,7 @@ PROMPT_VARIABLES = {
     },
     "robodojo": {
         "task": "put_bottles_into_dustbin",
+        "seed": 0,
         "layout": 0,
         "env_cfg_type": "arx_x5",
         "action_type": "joint",
@@ -200,7 +210,10 @@ def test_libero_prompts_observe_task_before_reading_memory(
 def test_dashboard_metadata_has_consistent_fields_and_runtime_components(
     robot_name: str,
 ) -> None:
-    dashboard = get_robot_spec(robot_name).dashboard
+    spec = get_robot_spec(robot_name)
+    parser = ArgumentParser()
+    spec.add_cli_args(parser, use_dashboard=True)
+    dashboard = spec.resolve_dashboard(parser.parse_args([]))
     assert dashboard is not None
 
     task = dashboard["task"]
@@ -222,7 +235,7 @@ def test_dashboard_metadata_has_consistent_fields_and_runtime_components(
 def test_unitree_declares_terminal_command_delivery_capabilities() -> None:
     spec = get_robot_spec("unitree")
     assert spec.is_real_robot
-    assert spec.dashboard is None
+    assert spec.resolve_dashboard is None
     assert not spec.supports_exploration
     assert spec.run_flash is None
 

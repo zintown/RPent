@@ -47,7 +47,6 @@ from rpent.planner.base import execute_tool
 from rpent.tools import ToolResult
 from rpent.tools.toolkit import Toolkit
 from rpent.utils.logging import get_logger
-from rpent.utils.templates import substitute
 
 logger = get_logger("http_mcp_server")
 
@@ -92,7 +91,7 @@ def build_mcp_server(toolkit: Toolkit) -> Server:
                 types.Tool(
                     name=declaration.name,
                     description=str(declaration.description),
-                    inputSchema=substitute(declaration.input_schema),
+                    inputSchema=declaration.model_input_schema,
                 )
             )
         return tools

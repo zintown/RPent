@@ -1,0 +1,25 @@
+[robot]
+id = "go2-01"
+type = "unitree.go2"
+environment = "simulation"
+adapter = "remote_navigation"
+
+[capabilities.map_navigation]
+description = "在已配置地图上规划路线，跟踪路径前往站位或坐标，并确认到达。"
+bindings = { localization = "sim", planner = "astar", executor = "sim" }
+
+[service_adapters]
+astar = "robot_astar"
+sim = "robot_sim"
+
+[mcp_servers.astar]
+transport = "streamable-http"
+url = "http://192.168.104.191:8769/mcp"
+enabled_tools = ["service_health", "plan_route"]
+tool_timeout_sec = 20
+
+[mcp_servers.sim]
+transport = "streamable-http"
+url = "http://192.168.104.191:8772/mcp"
+enabled_tools = ["sim_status", "get_pose", "walk_start", "walk_status", "walk_stop"]
+tool_timeout_sec = 10

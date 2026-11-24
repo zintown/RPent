@@ -4,6 +4,10 @@ __pycache__/
 
 # Local run outputs.
 logs/
+/runs/
+/output/
+.pytest_cache/
+.ruff_cache/
 
 /checkpoints/
 
@@ -23,7 +27,17 @@ docs/build/
 build/
 .claude/settings.json
 .venv/
+.venv*/
 /.codex-rpent-live/
 
 # Standalone calibration environment.
 .venv-calibration/
+
+# Private local credentials and service configuration.
+/.env.local
+.env
+.env.*
+!.env.example
+
+# Local MCP service configurations
+mcp.*.local.toml

@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -38,6 +38,7 @@ from rpent.evaluation import RunFinalizer
 from rpent.robots.prompt_bundle import PromptBundle
 
 if TYPE_CHECKING:
+    from rpent.mcp.task.config import TaskDeployment
     from rpent.utils.daemon import ProcessDaemon
 
 
@@ -53,6 +54,27 @@ class RunConfig:
 
 
 @dataclass(frozen=True)
+class TaskEvidence:
+    """Robot-owned evidence and any terminal condition it establishes."""
+
+    data: dict[str, Any] = field(default_factory=dict)
+    requires_attention: bool = False
+    verification_required: bool = False
+    error: str | None = None
+    stop_error: str | None = None
+
+
+@dataclass(frozen=True)
+class TaskExecutionSpec:
+    """Opt into natural-language dispatch and supply evidence after execution."""
+
+    read_evidence: Callable[[Path, dict[str, Any]], TaskEvidence] | None = None
+    configure_deployment: Callable[[TaskDeployment], TaskDeployment] | None = None
+    # Return a readiness problem for a bound capability, or None when ready.
+    check_capability: Callable[[str], str | None] | None = None
+
+
+@dataclass(frozen=True)
 class RobotSpec:
     """Robot-level (non-tool) extension points for RPent."""
 
@@ -64,7 +86,8 @@ class RobotSpec:
         [argparse.Namespace, Path, DashboardEventSink, set[str] | None],
         tuple[list["ProcessDaemon"], dict[str, Any]],
     ]
-    dashboard: DashboardSpec | None = None
+    #: Resolve Dashboard configuration from session options; None disables it.
+    resolve_dashboard: Callable[[argparse.Namespace], DashboardSpec] | None = None
     #: Physical scene restoration requires operator involvement, not simulator reset.
     #: Operator input requires an exclusive terminal unless an external ENV owns it.
     is_real_robot: bool = False
@@ -90,3 +113,5 @@ class RobotSpec:
     #: Takes the toolkit, the cell tag, and a note sink; returns at least
     #: ``{"done": bool}``. Left unset by robots without Flash Mode.
     run_flash: Callable[[Any, str, Callable[[str], None]], dict[str, Any]] | None = None
+    #: This adapter accepts the natural-language --task option used by task MCP.
+    task_execution: TaskExecutionSpec | None = None

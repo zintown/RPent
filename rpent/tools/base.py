@@ -31,6 +31,8 @@ from pydantic.json_schema import GenerateJsonSchema
 from pydantic_ai import Tool as PydanticTool
 from pydantic_core import core_schema
 
+from rpent.utils.templates import substitute
+
 ParamsT = ParamSpec("ParamsT")
 MAX_TOOL_TEXT_BYTES = 60000
 
@@ -60,6 +62,16 @@ class ToolResult:
             return text
         suffix = "\n[truncated]"
         return text[: MAX_TOOL_TEXT_BYTES - len(suffix)] + suffix
+
+
+def tool_error(code: str, message: str, **details: Any) -> ToolResult:
+    """Build a structured tool error with a code, message, and optional details."""
+    return ToolResult(
+        data={
+            "error": {"code": code, "message": message, **details},
+            "success": False,
+        }
+    )
 
 
 class _ToolJsonSchema(GenerateJsonSchema):
@@ -109,7 +121,7 @@ class _ToolJsonSchema(GenerateJsonSchema):
 
 @dataclass(frozen=True)
 class Tool(Generic[ParamsT]):
-    """A callable tool and the parameter model used by Toolkit to validate it.
+    """A callable tool and its argument schema.
 
     Access through an instance binds the handler to that instance. Direct Python
     calls keep the handler's usual semantics; Toolkit validates model input before
@@ -118,16 +130,23 @@ class Tool(Generic[ParamsT]):
 
     name: str
     description: str
-    args_schema: type[BaseModel]
+    args_schema: type[BaseModel] | None
     handler: Callable[ParamsT, ToolResult]
     _input_schema: dict[str, Any]
     readonly: bool = False
     _unbound_method: bool = False
+    capture_state: bool = True
 
     @property
     def input_schema(self) -> dict[str, Any]:
         """Return JSON Schema for the same parameters that Toolkit validates."""
         return deepcopy(self._input_schema)
+
+    @property
+    def model_input_schema(self) -> dict[str, Any]:
+        """Resolve RPent templates for native tools and preserve remote schemas."""
+        schema = self.input_schema
+        return schema if self.args_schema is None else substitute(schema)
 
     def with_handler(self, handler: Callable[..., ToolResult]) -> Tool:
         """Bind resources or an execution guard while retaining the declaration."""

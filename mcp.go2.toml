@@ -1,0 +1,14 @@
+[robot]
+id = "go2-real-01"
+type = "unitree.go2"
+environment = "real"
+adapter = "unitree"
+
+[capabilities.localization]
+description = "读取 Go2 机身在已配置地图中的实时位姿。"
+tools = ["go2.get_pose"]
+checks = { "go2.get_pose" = { ok = true, frame_id = "map" } }
+
+[mcp_servers.go2]
+url = "http://127.0.0.1:8792/mcp"
+enabled_tools = ["get_pose", "get_navigation_status"]

@@ -46,7 +46,6 @@ from rpent.dashboard.interaction import (
 )
 from rpent.dashboard.spec import DashboardSpec, TaskSpec
 from rpent.utils.logging import get_logger
-from rpent.utils.templates import substitute
 
 if TYPE_CHECKING:
     from rpent.session import EnvState, StepRecord
@@ -313,7 +312,7 @@ class DashboardState:
                 for spec in [
                     {
                         "name": declaration.name,
-                        "input_schema": substitute(declaration.input_schema),
+                        "input_schema": declaration.model_input_schema,
                     }
                     for declaration in toolkit.list_tools()
                 ]
@@ -352,7 +351,7 @@ class DashboardState:
                 for spec in [
                     {
                         "name": declaration.name,
-                        "input_schema": substitute(declaration.input_schema),
+                        "input_schema": declaration.model_input_schema,
                     }
                     for declaration in toolkit.list_tools()
                 ]
