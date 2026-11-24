@@ -70,6 +70,8 @@ class TaskExecutionSpec:
 
     read_evidence: Callable[[Path, dict[str, Any]], TaskEvidence] | None = None
     configure_deployment: Callable[[TaskDeployment], TaskDeployment] | None = None
+    # Return a readiness problem for a bound capability, or None when ready.
+    check_capability: Callable[[str], str | None] | None = None
 
 
 @dataclass(frozen=True)

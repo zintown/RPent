@@ -1,42 +1,25 @@
 # MuJoCo 仿真服务
 
-MuJoCo 在 `mujoco-sim` 仓库中独立运行，提供 Go2 仿真运动、位姿和第一视角。默认 MCP 地址为 `http://127.0.0.1:8791/mcp`。
-
-## 启动仿真
-
-在 `mujoco-sim` 仓库准备仿真环境并启动 MCP。 [MuJoCo 安装与启动](https://github.com/yanlinjie/mujoco-sim/blob/feat/mcp-interface/README.zh-CN.md)
-
-MuJoCo MCP 默认连接本机 8770 端口的仿真控制服务，可用 `--sim-endpoint` 修改。仿真第一视角由 8771 端口提供，可在浏览器打开 `http://127.0.0.1:8771/camera/front`。
+RPent 默认连接 `http://192.168.104.191:8772/mcp` 上的 `robot-sim`。仿真启停由服务方或操作者管理，网页推流地址见 `sim_status` 返回的 `stream.url`。
 
 ## 在 RPent 中接入
 
-在 [mcp.toml](../../mcp.toml) 的 `[mcp_servers.mujoco]` 配置仿真 MCP 地址。从 RPent 根目录检查 MuJoCo 的工具列表。
+在 [mcp.toml](../../mcp.toml) 的 `[mcp_servers.sim]` 配置地址，`[service_adapters]` 为它选择 `robot_sim` 适配器。从 RPent 根目录检查工具发现。
 
 ```bash
-.venv/bin/rpent mcp --mcp-config mcp.toml test mujoco
+.venv/bin/rpent mcp --mcp-config mcp.toml test sim
 ```
 
 | 工具 | 输入和输出 |
 | --- | --- |
+| `sim_status()` | 检查地图、仿真器、位姿和控制器占用 |
 | `get_pose()` | 返回 Go2 的实时地图位姿和跌倒状态 |
-| `get_walk_status()` | 返回当前或最近一次行走的状态 |
-| `follow_plan(plan_id)` | 取回指定路线并执行，返回行走编号、最终位姿和到达证据 |
-| `get_navigation_status()` | 检查控制器占用和规划地图版本是否匹配 |
-
-MuJoCo 的位姿查询和第一视角可独立使用。执行地图路线时，MuJoCo 按 `plan_id` 从 [A* MCP](ASTAR_USAGE.zh-CN.md) 取回规划。两个服务需使用相同地图 ID 和版本。A* 地址变更时，使用 MuJoCo 的 `--astar-mcp-url` 指定实际地址。
-
-MuJoCo 的默认行走预算是 120 秒，可用 `--walk-timeout-s` 调整。`tool_timeout_sec` 需覆盖行走和停车清理。在 MuJoCo 的 `enabled_tools` 中加入 `preview_plan` 可预演单目标路线，预演失败后重新规划。
+| `walk_start(plan)` | 接收完整规划，在后台行走并返回 `walk_id` |
+| `walk_status()` | 返回当前或最近一次行走的状态和逐段到达结果 |
+| `walk_stop()` | 停止当前行走 |
 
 ## 验收和排查
 
-在任务目录的 `transcript_unitree_*.json` 中核对 `finish.status=success` 和 `follow_plan` 的 `navigation_completed=true`。到达验收要求 `reached=true`、Go2 站立且位置误差不超过 0.25 米。指定朝向时，朝向误差需在 0.2 弧度以内。
+RPent 轮询 `walk_status`，核对同一 `walk_id` 已结束、每段都返回 `reached = true`、且没有跌倒。单次 MCP 请求预算由 `tool_timeout_sec` 设置，RPent 等待一次行走的预算为 600 秒。任务目录的 `navigation-*.json` 记录提交和终态，DSH 可从 `evidence.navigation` 读取结果。
 
-在 MuJoCo 所在主机检查仿真状态。
-
-```bash
-curl --noproxy '*' -fsS http://127.0.0.1:8770/health
-curl --noproxy '*' -fsS http://127.0.0.1:8770/pose
-curl --noproxy '*' -fsS http://127.0.0.1:8770/walk
-```
-
-在 `mujoco-sim` 仓库使用 `scripts/run_robot_mujoco.sh` 启停仿真或查询状态。回执丢失时，先根据行走编号核对执行和停车状态。
+`walk_stop()` 操作的是当前行走。每个仿真实例由一个 RPent 控制，取消时先核对行走编号，再发出停止请求并确认终态。提交或停车状态不明时，任务进入 `requires_attention`。

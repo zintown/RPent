@@ -1,16 +1,10 @@
 # A* 路径规划服务
 
-A* 在 `astar-service` 仓库中独立运行，提供地图点位查询和路径规划。默认 MCP 地址为 `http://127.0.0.1:8790/mcp`。
-
-## 启动服务
-
-在 `astar-service` 仓库安装依赖并启动原生服务和 MCP。 [A* 安装与启动](https://github.com/yanlinjie/astar-service/blob/feat/mcp-interface/README.md)
-
-A* MCP 默认读取本机 8765 端口的规划服务。原生服务已运行时，直接启动 MCP 即可。用 `--nav-endpoint` 指定规划服务地址，用 `--port` 指定 MCP 端口。
+A* 负责地图点位查询和路径规划。RPent 默认使用远程端点 `http://192.168.104.191:8769/mcp`。
 
 ## 在 RPent 中接入
 
-在 [mcp.toml](../../mcp.toml) 的 `[mcp_servers.astar]` 配置 A* 地址。从 RPent 根目录检查 A* 的工具列表。
+在 [mcp.toml](../../mcp.toml) 的 `[mcp_servers.astar]` 配置地址，`[service_adapters]` 为它选择 `robot_astar` 适配器。从 RPent 根目录检查工具发现。
 
 ```bash
 .venv/bin/rpent mcp --mcp-config mcp.toml test astar
@@ -18,23 +12,9 @@ A* MCP 默认读取本机 8765 端口的规划服务。原生服务已运行时�
 
 ## 规划接口
 
-默认配置为 RPent 提供点位查询和路径规划。执行端可通过 `get_plan` 获取完整路线。
-
 | 工具 | 输入和输出 |
 | --- | --- |
-| `list_waypoints()` | 返回当前地图版本、点位名称、编号和站位 |
-| `plan_route(start, goal)` | 输入地图起点 `{x,y,yaw?}` 和一个目标名称、编号或坐标，返回 `plan_id` 及路径摘要 |
-| `get_plan(plan_id)` | 按编号读取完整规划 |
+| `service_health()` | 返回 `map_id`、`map_version` 和点位数量 |
+| `plan_route(start_x, start_y, goals, start_yaw?)` | 输入地图起点和有序目标列表，返回完整规划 |
 
-`get_plan` 返回的 `legs[].path` 包含完整的 `[x,y]` 点列。`legs[].headings` 是相邻点之间的方向。长度用米，角度用弧度。地图改变或 A* MCP 重启后重新规划。
-
-## 状态和排查
-
-在 A* 所在主机检查地图信息和实时点位。
-
-```bash
-curl --noproxy '*' -fsS http://127.0.0.1:8765/health
-curl --noproxy '*' -fsS http://127.0.0.1:8765/waypoints
-```
-
-在 `astar-service` 仓库执行 `bash scripts/run_robot_astar.sh status` 查看规划服务状态，或执行 `bash scripts/run_robot_astar.sh stop` 停止它。前台 MCP 进程可用 `Ctrl+C` 停止。
+目标可以是名称、点位 ID 或坐标对象。规划的 `legs[].path` 是分段的 `[x, y]` 点列，分段目标包含站位和朝向。长度用米，角度用弧度。RPent 核对规划和执行端的地图版本，并把 A* 回执中的 `structuredContent` 完整交给仿真。

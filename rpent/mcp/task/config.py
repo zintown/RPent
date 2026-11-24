@@ -7,11 +7,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
 from rpent.robots.base import get_robot_spec
 from rpent.robots.robot_spec import TaskExecutionSpec
@@ -20,6 +20,8 @@ from rpent.tools.mcp_client import McpServerConfig, parse_mcp_servers, read_mcp_
 RobotName = Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")]
 Environment = Literal["simulation", "real"]
 ToolReference = Annotated[str, Field(pattern=r"^[A-Za-z0-9_-]+\.\S+$")]
+ServerName = Annotated[str, Field(pattern=r"^[A-Za-z0-9_-]+$")]
+AdapterName = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]*$")]
 CheckValue = bool | int | float | str
 
 
@@ -31,19 +33,28 @@ class RobotIdentity(BaseModel):
     id: RobotName
     type: RobotName
     environment: Environment
-    adapter: Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]*$")] = "mcp"
+    adapter: AdapterName = "mcp"
 
 
 class CapabilityConfig(BaseModel):
-    """Tools required for a capability and read-only checks of live readiness."""
+    """Declare a direct tool capability or bind providers to a workflow."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
     description: Annotated[str, Field(min_length=1)]
-    tools: list[ToolReference] = Field(min_length=1)
+    tools: list[ToolReference] = Field(default_factory=list)
     checks: dict[
         ToolReference, Annotated[dict[str, CheckValue], Field(min_length=1)]
     ] = Field(default_factory=dict)
+    bindings: dict[AdapterName, ServerName] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_capability(self) -> CapabilityConfig:
+        if bool(self.tools) == bool(self.bindings) or (self.bindings and self.checks):
+            raise ValueError(
+                "configure either tools with optional checks or workflow bindings"
+            )
+        return self
 
 
 class _CapabilityTable(BaseModel):
@@ -60,6 +71,7 @@ class TaskDeployment:
     servers: dict[str, McpServerConfig]
     capabilities: dict[str, CapabilityConfig]
     execution: TaskExecutionSpec
+    service_adapters: dict[str, str] = field(default_factory=dict)
 
 
 def load_deployment(
@@ -86,7 +98,24 @@ def load_deployment(
 
     servers = parse_mcp_servers(config, path)
     capabilities = _CapabilityTable(entries=config.get("capabilities", {})).entries
-    deployment = TaskDeployment(robot, servers, capabilities, execution)
+    service_adapters = TypeAdapter(dict[ServerName, AdapterName]).validate_python(
+        config.get("service_adapters", {}), strict=True
+    )
+    unknown_servers = service_adapters.keys() - servers.keys()
+    if unknown_servers:
+        raise ValueError(
+            f"service_adapters references unknown services: {sorted(unknown_servers)}"
+        )
+    deployment = TaskDeployment(
+        robot, servers, capabilities, execution, service_adapters
+    )
     if execution.configure_deployment is not None:
-        return execution.configure_deployment(deployment)
+        deployment = execution.configure_deployment(deployment)
+    if (
+        any(cap.bindings for cap in capabilities.values())
+        and deployment.execution.check_capability is None
+    ):
+        raise ValueError(
+            f"robot adapter {robot.adapter!r} does not support workflow bindings"
+        )
     return deployment

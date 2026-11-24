@@ -117,11 +117,27 @@ def _capability_problem(
 def check_robot(deployment: TaskDeployment, state: RobotState) -> RobotInfo:
     """Return live capability status when the runner can accept a new task."""
     discovered: dict[str, _Discovery] = {}
+    workflow_checks: dict[str, str | None] = {}
     if state == "idle":
+        workflows = {
+            name: cap.bindings
+            for name, cap in deployment.capabilities.items()
+            if cap.bindings
+        }
+        bound_services = {
+            service for bindings in workflows.values() for service in bindings.values()
+        }
+        direct_services = {
+            ref.split(".", 1)[0]
+            for cap in deployment.capabilities.values()
+            for ref in (*cap.tools, *cap.checks)
+        }
         active = {
             name: config
             for name, config in deployment.servers.items()
-            if config.enabled and config.enabled_tools != []
+            if config.enabled
+            and config.enabled_tools != []
+            and (name not in bound_services or name in direct_services)
         }
         if active:
             checks: dict[str, set[str]] = defaultdict(set)
@@ -140,8 +156,11 @@ def check_robot(deployment: TaskDeployment, state: RobotState) -> RobotInfo:
                     discovered = {
                         name: future.result() for name, future in pending.items()
                     }
-        if not any(result.tools for result in discovered.values()) or any(
-            result.error for result in discovered.values()
+        check_capability = deployment.execution.check_capability
+        if check_capability is not None:
+            workflow_checks = {name: check_capability(name) for name in workflows}
+        if any(result.error for result in discovered.values()) or (
+            not workflows and not any(result.tools for result in discovered.values())
         ):
             state = "unavailable"
 
@@ -149,6 +168,11 @@ def check_robot(deployment: TaskDeployment, state: RobotState) -> RobotInfo:
     for name, config in deployment.capabilities.items():
         if not discovered and state in {"busy", "requires_attention"}:
             status, reason = "unverified", "runner cannot accept a task now"
+        elif config.bindings:
+            reason = workflow_checks.get(
+                name, "workflow readiness could not be verified"
+            )
+            status = "unavailable" if reason is not None else "ready"
         elif problem := _capability_problem(config, discovered):
             status, reason = "unavailable", problem
         elif not config.checks:

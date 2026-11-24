@@ -122,7 +122,7 @@ def _build_argparser() -> argparse.ArgumentParser:
         dest="robot_name",
         required=False,
         choices=known_robots,
-        help=f"Robot backend. Known robots: {known_robots_text}.",
+        help=f"Robot backend, or inferred from [robot] in --mcp-config. Known robots: {known_robots_text}.",
     )
     ap.add_argument(
         "--env",
@@ -374,9 +374,20 @@ def main() -> int:
             parser.error("--robot and --env are aliases; provide only one of them")
         logger.warning("--env is deprecated and will be removed; use --robot instead")
         early.robot_name = early.env_name
+    help_requested = "-h" in sys.argv or "--help" in sys.argv
+    if early.robot_name is None and early.mcp_config is not None and not help_requested:
+        from rpent.mcp.task.config import RobotIdentity
+        from rpent.tools.mcp_client import read_mcp_config
+
+        try:
+            identity = read_mcp_config(early.mcp_config.expanduser()).get("robot")
+            if identity is not None:
+                early.robot_name = RobotIdentity.model_validate(identity).adapter
+        except (OSError, ValueError) as exc:
+            parser.error(str(exc))
     if early.robot_name is None:
-        if "-h" not in sys.argv and "--help" not in sys.argv:
-            parser.error("--robot is required")
+        if not help_requested:
+            parser.error("--robot is required without a [robot] deployment")
     else:
         robot_spec = get_robot_spec(early.robot_name)
         robot_spec.add_cli_args(parser, use_dashboard=early.dashboard)

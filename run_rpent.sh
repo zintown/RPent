@@ -16,7 +16,7 @@ if [[ $# -eq 1 && "$1" == '--help' ]]; then
 可选环境变量：
   RPENT_CONFIG_FILE               自定义 Bash 配置文件
   RPENT_MCP_CONFIG                MCP 配置文件，默认仓库根目录的 mcp.toml
-  RPENT_ROBOT_ADAPTER             手动运行时的机器人适配器，默认 unitree
+  RPENT_ROBOT_ADAPTER             手动覆盖部署文件所选的机器人适配器
   RPENT_VENV_DIR                  已安装 RPent 的虚拟环境目录
   RPENT_MODEL                     模型，默认 openai:deepseek-flash
   RPENT_PLANNER_TIMEOUT_S         模型会话预算，默认 900 秒
@@ -67,8 +67,13 @@ rpent_memory_args=()
 if [[ -n "${RPENT_MEMORY_DIR:-}" ]]; then
     rpent_memory_args=(--memory-dir "$RPENT_MEMORY_DIR")
 fi
+rpent_robot_args=()
+rpent_adapter="${rpent_dispatch_adapter:-${RPENT_ROBOT_ADAPTER:-}}"
+if [[ -n "$rpent_adapter" ]]; then
+    rpent_robot_args=(--robot "$rpent_adapter")
+fi
 exec "$rpent_python" -m rpent.cli.main \
-    --robot "${rpent_dispatch_adapter:-${RPENT_ROBOT_ADAPTER:-unitree}}" \
+    "${rpent_robot_args[@]}" \
     --mcp-config "${rpent_dispatch_config:-${RPENT_MCP_CONFIG:-$rpent_repo_dir/mcp.toml}}" \
     "${rpent_memory_args[@]}" \
     --planner api --model "${RPENT_MODEL:-openai:deepseek-flash}" \

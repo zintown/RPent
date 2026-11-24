@@ -2,19 +2,24 @@
 id = "go2-01"
 type = "unitree.go2"
 environment = "simulation"
-adapter = "unitree"
+adapter = "remote_navigation"
 
 [capabilities.map_navigation]
 description = "在已配置地图上规划路线，跟踪路径前往站位或坐标，并确认到达。"
-tools = ["astar.list_waypoints", "astar.plan_route", "mujoco.get_pose", "mujoco.follow_plan", "mujoco.get_walk_status"]
-checks = { "astar.list_waypoints" = { ok = true }, "mujoco.get_pose" = { fallen = false }, "mujoco.get_navigation_status" = { ready = true } }
+bindings = { localization = "sim", planner = "astar", executor = "sim" }
+
+[service_adapters]
+astar = "robot_astar"
+sim = "robot_sim"
 
 [mcp_servers.astar]
-url = "http://127.0.0.1:8790/mcp"
-enabled_tools = ["list_waypoints", "plan_route"]
+transport = "streamable-http"
+url = "http://192.168.104.191:8769/mcp"
+enabled_tools = ["service_health", "plan_route"]
+tool_timeout_sec = 20
 
-[mcp_servers.mujoco]
-url = "http://127.0.0.1:8791/mcp"
-enabled_tools = ["get_pose", "follow_plan", "get_walk_status"]
-tool_timeout_sec = 150
-run_report_tool = "get_run_report"
+[mcp_servers.sim]
+transport = "streamable-http"
+url = "http://192.168.104.191:8772/mcp"
+enabled_tools = ["sim_status", "get_pose", "walk_start", "walk_status", "walk_stop"]
+tool_timeout_sec = 10

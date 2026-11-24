@@ -80,16 +80,24 @@ def test_only_action_attempts_are_reconciled_by_run_id(
 
 
 @pytest.mark.parametrize(
-    ("config_name", "environment", "service", "other_service"),
+    ("environment", "service", "other_service"),
     [
-        ("mcp.toml", "simulation", "mujoco", "go2"),
-        ("mcp.go2.toml", "real", "go2", "mujoco"),
+        ("simulation", "mujoco", "go2"),
+        ("real", "go2", "mujoco"),
     ],
 )
 def test_unitree_pose_evidence_uses_the_configured_downstream(
-    tmp_path, config_name, environment, service, other_service
+    tmp_path, environment, service, other_service
 ):
-    profile = Path(__file__).resolve().parents[4] / config_name
+    if environment == "simulation":
+        profile = tmp_path / "unitree-simulation.toml"
+        profile.write_text(
+            '[robot]\nid = "go2-test"\ntype = "unitree.go2"\nenvironment = "simulation"\n'
+            'adapter = "unitree"\n[mcp_servers.mujoco]\n'
+            'url = "http://127.0.0.1:1/mcp"\nenabled_tools = ["get_pose", "follow_plan"]\n'
+        )
+    else:
+        profile = Path(__file__).resolve().parents[4] / "mcp.go2.toml"
     deployment = load_deployment(profile)
     assert deployment.robot.environment == environment
     assert "get_pose" in deployment.servers[service].enabled_tools

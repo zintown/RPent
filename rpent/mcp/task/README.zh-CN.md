@@ -13,7 +13,7 @@ python3.12 -m venv .venv
 
 ## 配置和启动
 
-`mcp.toml` 同时声明机器人的身份、能力和 RPent 可用的本地服务。以下示例假设机械臂的 MCP 服务已经在本机 8792 端口运行。
+`mcp.toml` 同时声明机器人的身份、能力和 RPent 可用的下游服务。以下示例假设机械臂的 MCP 服务已经在本机 8792 端口运行。
 
 ```toml
 [robot]
@@ -32,9 +32,11 @@ tools = ["arm.grasp", "arm.get_status"]
 checks = { "arm.get_status" = { ready = true } }
 ```
 
-`id` 在 DSH 接入的机器人中保持唯一。`environment` 取 `real` 或 `simulation`。`adapter` 默认是 `mcp`。Unitree 部署使用 `unitree`，以加载它的提示词和执行证据。根目录的 [mcp.toml](../../../mcp.toml) 是 Unitree 仿真实例。
+`id` 在 DSH 接入的机器人中保持唯一。`environment` 取 `real` 或 `simulation`。`adapter` 默认是 `mcp`。根目录的 [mcp.toml](../../../mcp.toml) 使用 `remote_navigation` 适配器连接远程 Go2 仿真。
 
 `tools` 中的引用对应 `服务名.工具名`，必须能从 RPent 的启用工具中发现。`checks` 指定无参、带 MCP `readOnlyHint` 的检查工具及预期返回值。检查工具可独立于规划器的工具白名单。`checks` 的字段名可以用点号读取嵌套对象，例如 `"camera.ready" = true`。地图导航的能力定义应覆盖定位、规划和路径跟踪。
+
+`remote_navigation` 部署在 `[capabilities.map_navigation]` 用 `bindings` 指定定位、规划和执行服务，并在 `[service_adapters]` 选择各服务的协议适配器。工作流负责地图和状态校验、转交完整路线及确认终态。[远程 Go2 仿真](../../../robots/unitree/README.md)
 
 在 RPent 仓库根目录启动。与 DSH 同机仿真时，使用随仓库提供的 `mcp.toml` 并监听 `127.0.0.1`。远程连接使用 RPent 所在机器的可达地址，同一套仿真配置也可用于验证远程连接。部署到真机时，配置文件需要对应的真机适配器和下游 MCP 服务。
 

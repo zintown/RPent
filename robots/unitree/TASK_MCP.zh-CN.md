@@ -4,7 +4,7 @@ DSH 通过 RPent 的 `/mcp` 查询 Go2 的能力并下发整条任务。RPent �
 
 ## 启动服务
 
-先安装 RPent 并分别启动 A* 和 MuJoCo，再在 RPent 根目录运行任务 MCP。下列命令使用本机连接。 [RPent 安装](../../rpent/mcp/task/README.zh-CN.md#安装依赖) · [A* 路径规划](ASTAR_USAGE.zh-CN.md) · [MuJoCo 仿真](MUJOCO_USAGE.zh-CN.md)
+先安装 RPent 并确认能访问配置中的远程 A* 和 MuJoCo，再在 RPent 根目录运行任务 MCP。下列命令让同机的 DSH 连接 RPent。远程仿真器运行后，导航能力才可能就绪。 [RPent 安装](../../rpent/mcp/task/README.zh-CN.md#安装依赖) · [A* 路径规划](ASTAR_USAGE.zh-CN.md) · [MuJoCo 仿真](MUJOCO_USAGE.zh-CN.md)
 
 ```bash
 set -a
@@ -39,7 +39,7 @@ Go2 提供按运行 ID 查询的回执时，在 RPent 配置 `run_report_tool = 
 
 ## 连接和调用
 
-DSH 与仿真同机时，通过 `--patch` 加载 `apps/cli/config/examples/rpent/local.cordis.yml`，连接 `http://127.0.0.1:8780/mcp`。跨主机时，加载同目录的 `remote.cordis.yml` 并通过 `DSH_RPENT_REMOTE_URL` 指定完整的 `/mcp` 地址。需要 Bearer 鉴权时，按 DSH 的 `apps/cli/config/examples/rpent/USAGE.zh-CN.md` 添加认证请求头。
+DSH 与 RPent 同机时，通过 `--patch` 加载 `apps/cli/config/examples/rpent/local.cordis.yml`，连接 `http://127.0.0.1:8780/mcp`。跨主机时，加载同目录的 `remote.cordis.yml` 并通过 `DSH_RPENT_REMOTE_URL` 指定 RPent 的完整 `/mcp` 地址。需要 Bearer 鉴权时，按 DSH 的 `apps/cli/config/examples/rpent/USAGE.zh-CN.md` 添加认证请求头。
 
 DSH 先调用 `get_robot_info()`，确认节点为 `idle` 且所需能力为 `ready`。再通过 `run_task(instruction)` 提交完整指令并等待终态。下面的示例只查询位姿。
 

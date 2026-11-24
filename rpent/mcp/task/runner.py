@@ -91,10 +91,16 @@ class TaskRunner:
         self.deployment = deployment
         self._mcp_config = tomlkit.dumps(
             {
+                "robot": deployment.robot.model_dump(),
                 "mcp_servers": {
                     name: config.model_dump(exclude_none=True)
                     for name, config in deployment.servers.items()
-                }
+                },
+                "service_adapters": deployment.service_adapters,
+                "capabilities": {
+                    name: config.model_dump(exclude_defaults=True)
+                    for name, config in deployment.capabilities.items()
+                },
             }
         )
         self.jobs_dir.mkdir(parents=True, exist_ok=True)
