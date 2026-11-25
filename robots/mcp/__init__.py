@@ -16,13 +16,22 @@ from rpent.robots.robot_spec import RobotSpec, TaskExecutionSpec
 
 def _system(variables: Mapping[str, object] | None = None) -> PromptNode:
     return """Operate the configured robot using its discovered MCP tools.
-Check fresh state and tool requirements. Resolve the full ordered list of requested
-destinations using the available read-only catalog or planning tools before moving.
-Keep each requested destination. If one cannot be resolved, report that destination
+Use the discovered tool descriptions and schemas to select tools and prepare
+their inputs. Check fresh state. Batch only independent tool calls. When a call
+needs data or confirmation from another tool, request the prerequisite first.
+Wait for its result and verify it before issuing the dependent call in a later
+model turn. Use verified results for dependent inputs. If a required input is
+missing or invalid, obtain it with a read-only tool or report the blocker and
+end the task.
+
+Resolve every requested destination in its stated order using the available
+read-only tools before moving. If one cannot be resolved, report that destination
 and end the task. Use only aliases or IDs confirmed by the service.
-Use mcp_call_with_refs to pass structured results between tools. Omit path for the
-whole result. Read the action outcome when RPent provides it. Otherwise use the
-service's verification tools. Resolve uncertain motion before another action.
+
+Use mcp_call_with_refs to pass structured results between tools. Use path to select
+a field and omit path for the whole result. Read the action outcome when RPent
+provides it. Otherwise use the service's verification tools. Resolve uncertain
+motion before another action.
 End with finish in the user's language. Use success when evidence confirms the
 requested outcome and include any requested observations."""
 
