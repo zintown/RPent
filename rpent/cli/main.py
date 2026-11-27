@@ -771,6 +771,8 @@ def main() -> int:
         stats.get("tool_calls", "?"),
     )
     logger.info("transcript: %s", transcript_path)
+    if robot_name == "mcp" and finish_result and finish_result.get("summary"):
+        print("\n任务结果\n" + str(finish_result["summary"]), flush=True)
 
     if robot_spec.finalize_run is not None:
         try:
