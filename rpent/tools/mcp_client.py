@@ -26,6 +26,8 @@ from concurrent.futures import wait
 from contextlib import ExitStack, asynccontextmanager
 from functools import partial
 from hashlib import sha256
+from io import BytesIO
+from uuid import uuid4
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlsplit
@@ -405,8 +407,25 @@ def _invoke(
         if isinstance(block, types.TextContent):
             content.append({"type": "text", "text": block.text})
             messages.append(block.text)
-        elif isinstance(block, types.ImageContent) and block.mimeType == "image/png":
-            images.append(base64.b64decode(block.data, validate=True))
+        elif isinstance(block, types.ImageContent) and block.mimeType in {"image/png", "image/jpeg"}:
+            raw = base64.b64decode(block.data, validate=True)
+            if block.mimeType == "image/jpeg":
+                from PIL import Image
+
+                # ToolResult consumers expect PNG bytes, including the API planner.
+                with Image.open(BytesIO(raw)) as photo, BytesIO() as output:
+                    photo.convert("RGB").save(output, format="PNG")
+                    images.append(output.getvalue())
+            else:
+                images.append(raw)
+            photo_dir = os.environ.get("GO2_WEB_PHOTO_DIR")
+            if photo_dir and name == "observe":
+                suffix = ".jpg" if block.mimeType == "image/jpeg" else ".png"
+                path = Path(photo_dir) / (uuid4().hex + suffix)
+                pending = path.with_suffix(".tmp")
+                pending.write_bytes(raw)
+                pending.replace(path)
+                content.append({"type": "text", "text": "照片已保存到当前网页任务。"})
         else:
             content.append(
                 {"type": block.type, "notice": "MCP content type unavailable"}
